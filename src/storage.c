@@ -80,9 +80,9 @@ int storage_load(ScenarioStore *store, char *error, size_t size)
     }
     if (!fgets(line, sizeof(line), f) ||
         sscanf(line, "INVEST\t%d\t%d", &version, &selected) != 2 ||
-        (version != 1 && version != 2)) goto malformed;
+        (version != 1 && version != 2 && version != 3)) goto malformed;
     while (fgets(line, sizeof(line), f)) {
-        char *fields[7], *cursor, *token;
+        char *fields[8], *cursor, *token;
         Scenario s = {0};
         int n = 0;
         if (!strchr(line, '\n') && !feof(f)) goto malformed;
@@ -90,11 +90,11 @@ int storage_load(ScenarioStore *store, char *error, size_t size)
         if (result.count >= INVEST_MAX_SCENARIOS) goto malformed;
         cursor = NULL;
         token = strtok_r(line, "\t\r\n", &cursor);
-        while (token && n < 7) {
+        while (token && n < 8) {
             fields[n++] = token;
             token = strtok_r(NULL, "\t\r\n", &cursor);
         }
-        if (token || n != (version == 1 ? 5 : 7) ||
+        if (token || n != (version == 1 ? 5 : version == 2 ? 7 : 8) ||
             strlen(fields[0]) >= sizeof(s.name)) goto malformed;
         snprintf(s.name, sizeof(s.name), "%s", fields[0]);
         if (parse_double(fields[1], &s.initial) < 0 ||
@@ -106,6 +106,13 @@ int storage_load(ScenarioStore *store, char *error, size_t size)
                             s.rates, &s.rate_count) < 0 ||
              schedule_parse(fields[6], INVEST_EXTRAS, s.months,
                             s.extras, &s.extra_count) < 0)) goto malformed;
+        if (version == 3 &&
+            (rules_parse(fields[5], INVEST_RATES, s.months,
+                         s.rates, &s.rate_count) < 0 ||
+             schedule_parse(fields[6], INVEST_EXTRAS, s.months,
+                            s.extras, &s.extra_count) < 0 ||
+             rules_parse(fields[7], INVEST_MONTHLY, s.months,
+                         s.monthlies, &s.monthly_count) < 0)) goto malformed;
         if (!scenario_valid(&s)) goto malformed;
         result.items[result.count++] = s;
     }
@@ -120,7 +127,7 @@ malformed:
     return -1;
 }
 
-/* Na primeira migracao, guarda uma copia do arquivo v1 antes da substituicao. */
+/* Na primeira migracao, preserva uma copia dos formatos INVEST 1 ou 2. */
 static int backup_legacy(const char *path)
 {
     char backup[PATH_MAX];
@@ -128,17 +135,24 @@ static int backup_legacy(const char *path)
     char header[64], buf[4096];
     size_t n;
     int rc = 0;
-    if (snprintf(backup, sizeof(backup), "%s.v1.bak", path) >=
-        (int)sizeof(backup)) return -1;
     in = fopen(path, "rb");
     if (!in) return errno == ENOENT ? 0 : -1;
     if (!fgets(header, sizeof(header), in)) {
         fclose(in);
         return -1;
     }
-    if (strncmp(header, "INVEST\t1\t", 9) != 0) {
-        fclose(in);
-        return 0;
+    {
+        int version;
+        if (sscanf(header, "INVEST\t%d", &version) != 1 || version == 3) {
+            fclose(in);
+            return 0;
+        }
+        if ((version != 1 && version != 2) ||
+            snprintf(backup, sizeof(backup), "%s.v%d.bak", path, version) >=
+                (int)sizeof(backup)) {
+            fclose(in);
+            return -1;
+        }
     }
     if (access(backup, F_OK) == 0) {
         fclose(in);
@@ -176,7 +190,7 @@ int storage_save(const ScenarioStore *store, char *error, size_t size)
             return -1;
         }
     if (backup_legacy(path) < 0) {
-        fail(error, size, "Nao foi possivel guardar backup v0.1");
+        fail(error, size, "Nao foi possivel criar backup da versao anterior");
         return -1;
     }
     n = snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", path);
@@ -196,18 +210,21 @@ int storage_save(const ScenarioStore *store, char *error, size_t size)
         fail(error, size, "Erro de escrita");
         return -1;
     }
-    if (fprintf(f, "INVEST\t2\t%d\n", store->selected) < 0) goto failed;
+    if (fprintf(f, "INVEST\t3\t%d\n", store->selected) < 0) goto failed;
     for (i = 0; i < store->count; ++i) {
         const Scenario *s = &store->items[i];
         char rates[INVEST_MAX_EVENTS * 36 + 4];
         char extras[INVEST_MAX_EVENTS * 36 + 4];
-        if (schedule_format(s->rates, s->rate_count, rates,
-                            sizeof(rates), 1) < 0 ||
+        char monthly[INVEST_MAX_EVENTS * 48 + 4];
+        if (rules_format(s->rates, s->rate_count, rates,
+                         sizeof(rates)) < 0 ||
             schedule_format(s->extras, s->extra_count, extras,
                             sizeof(extras), 1) < 0 ||
-            fprintf(f, "%s\t%.17g\t%.17g\t%.17g\t%d\t%s\t%s\n",
+            rules_format(s->monthlies, s->monthly_count, monthly,
+                         sizeof(monthly)) < 0 ||
+            fprintf(f, "%s\t%.17g\t%.17g\t%.17g\t%d\t%s\t%s\t%s\n",
                     s->name, s->initial, s->monthly, s->rate_percent,
-                    s->months, rates, extras) < 0) goto failed;
+                    s->months, rates, extras, monthly) < 0) goto failed;
     }
     if (fflush(f) != 0 || fsync(fd) != 0) goto failed;
     if (fclose(f) != 0) {

@@ -8,10 +8,13 @@
 #define INVEST_MAX_EVENTS 32
 #define INVEST_NAME_SIZE 64
 
-/* Uma taxa em determinado mes substitui a taxa mensal base daquele mes em
- * diante. Um aporte extra ocorre apenas no mes indicado, ao fim do mes. */
+/* Regras (juros / aportes mensais): end_month == 0 indica que a regra
+ * continua ate o fim, inclusive depois de sobreposicoes temporarias.
+ * A regra ativa mais recente prevalece no mes considerado. Aportes extras
+ * sao pontuais e ignoram end_month (sempre zero). */
 typedef struct {
     int month;
+    int end_month;
     double value;
 } InvestEvent;
 
@@ -25,6 +28,8 @@ typedef struct {
     InvestEvent rates[INVEST_MAX_EVENTS];
     int extra_count;
     InvestEvent extras[INVEST_MAX_EVENTS];
+    int monthly_count;
+    InvestEvent monthlies[INVEST_MAX_EVENTS];
 } Scenario;
 
 typedef struct {
@@ -40,24 +45,25 @@ typedef struct {
     double extra_contributions;
 } Projection;
 
-enum InvestScheduleType { INVEST_RATES, INVEST_EXTRAS };
+enum InvestScheduleType { INVEST_RATES, INVEST_EXTRAS, INVEST_MONTHLY };
 
-/* Taxa anual efetiva equivalente a uma taxa mensal constante, em percentuais.
- * Ex.: 1,09% a.m. -> aproximadamente 13,8933% a.a. */
 double annual_equivalent_rate(double monthly_percent);
 void scenario_default(Scenario *s);
 int scenario_valid(const Scenario *s);
-/* Nao modifica o cenario. Cada vetor opcional tem s->months+1 elementos.
- * Ao fim de cada mes: saldo = saldo * (1+taxa/100) + mensal + extra. */
+/* Mes M: saldo = saldo*(1+taxa_efetiva(M)/100)+aporte_efetivo(M)+extra(M).
+ * Um intervalo [inicio,fim] e inclusivo. Fim 0 = permanente.
+ * Terminando um intervalo, a regra anterior ainda vigente e retomada. */
 int project_scenario(const Scenario *s, Projection *out,
                      double *balances, double *principal);
-/* Parseia '6:1,25; 12:0,85' ou '6=1.25; 12=0.85'.
- * Meses fora de ordem sao ordenados; meses duplicados sao rejeitados.
- * Cadeia vazia ou '-' significa sem eventos. */
+/* Para arquivos historicos INVEST 2 (formato mes:valor) e extras pontuais. */
 int schedule_parse(const char *input, enum InvestScheduleType kind,
                    int months, InvestEvent *out, int *count);
-/* Usa ponto decimal ao armazenar, virgula ao exibir. */
 int schedule_format(const InvestEvent *events, int count, char *out,
                     size_t size, int disk_format);
+/* Para INVEST 3: inicio:fim:valor; fim=0 quer dizer ate o fim.
+ * Esses detalhes nao precisam ser digitados pelo usuario (somente disco). */
+int rules_parse(const char *input, enum InvestScheduleType kind,
+                int months, InvestEvent *out, int *count);
+int rules_format(const InvestEvent *events, int count, char *out, size_t size);
 
 #endif

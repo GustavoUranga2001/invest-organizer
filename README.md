@@ -1,15 +1,15 @@
-# invest v0.3.1 — Linux
+# invest v0.3.2 — Linux
 
-Simulador de investimentos com interface grafica nativa X11, em C11 e Xlib.
-A v0.3.1 recupera as abas no topo e a paleta escura/verde da v0.2, mantendo
-os formularios simples da v0.3.
-Nao usa GTK, Qt, Electron, navegadores, telemetria ou internet.
+Simulador de investimentos com interface gráfica nativa para Linux, em **C11 e Xlib**.
+Sem GTK, Qt, Electron, banco de dados, conta na nuvem ou conexão obrigatória à internet.
 
-## Requisitos
+A v0.3.2 acrescenta **aportes mensais e taxas de juros temporários ou permanentes**, com formulários acessíveis pela aba **EVENTOS**. Mantém o tema escuro/verde, as três abas no topo, a taxa anual equivalente e a comparação de cenários da v0.3.1.
 
-- Linux com sessao X11 ou Wayland com XWayland
-- Compilador C (`cc` / `gcc`), `make` e cabecalhos de desenvolvimento da Xlib
-- Fontes X11 (preferencialmente Helvetica, com fallback para `fixed`)
+## Dependências
+
+- Linux com X11 (ou Wayland com XWayland habilitado)
+- `cc`/GCC, `make` e Xlib de desenvolvimento
+- Fontes X11 (recomendado: Helvetica; há fallback para `fixed`)
 
 **Arch Linux:**
 
@@ -23,7 +23,7 @@ sudo pacman -S --needed base-devel libx11 xorg-fonts-misc xorg-fonts-75dpi
 sudo apt install build-essential libx11-dev xfonts-base xfonts-75dpi
 ```
 
-## Compilar e executar
+## Compilar, executar e testar
 
 ```sh
 make
@@ -31,96 +31,80 @@ make test
 ./invest
 ```
 
-Ou simplesmente execute `./run.sh`, que compila caso nao exista um binario local.
-
-Para adicionar ao menu de aplicativos sem privilegios de administrador:
+Alternativa: `./run.sh`. Para instalar no menu de aplicativos:
 
 ```sh
 make install PREFIX="$HOME/.local"
 ```
 
-Se `~/.local/bin` nao estiver no PATH, execute o binario por esse caminho.
+## O que há na interface
 
-## Como usar
+- **SIMULADOR:** nome, valor inicial, aporte mensal BASE, juros mensais BASE, prazo, taxa anual equivalente BASE, resultados e gráfico de patrimônio versus capital investido.
+- **EVENTOS:** três controles internos: **Juros**, **Aportes mensais**, **Aportes extras**.
+- **COMPARAR:** seleção de dois cenários com resultados e gráficos.
+- Lateral: criar, selecionar, duplicar e excluir cenários (máximo: 32).
 
-### Simulador (aba superior)
+### Ajustar os aportes mensais
 
-1. Clique em **Novo cenario** ou selecione um cenario no painel lateral.
-2. Clique no campo de nome para renomear.
-3. Digite **valor inicial**, **aporte mensal**, **juros por mes** e **prazo**.
-4. Pressione Enter ou clique fora do campo para atualizar o resultado e grafico.
-5. Clique em **Salvar** ou pressione Ctrl+S (o programa tambem salva ao sair normalmente).
+1. Abra **EVENTOS → Aportes mensais → + Adicionar**.
+2. Informe o mês em que o novo aporte começa e o valor mensal desejado.
+3. Em **Por quanto tempo?**, escolha **Até o fim** ou **Por alguns meses**.
+4. Se escolheu um intervalo, informe sua duração em meses (o mês inicial conta como primeiro mês).
+5. Clique em **Salvar**. Use **Editar** ou **Remover** para alterar depois.
 
-Abaixo da taxa mensal aparece sua **taxa anual efetiva equivalente**, calculada por
-`((1 + taxa_mensal / 100)^12 - 1) * 100` e arredondada a duas casas decimais.
-Por exemplo, 1,09% a.m. equivale a aproximadamente 13,89% a.a.
-Quando ha mudancas de juros programadas, esse percentual anual se refere apenas
-**a taxa mensal base**; nao representa a rentabilidade anual completa do cenario.
+**Exemplo:** aporte base de R$ 100 por mês; do mês 3 ao mês 4, R$ 50 por mês; a partir do mês 5, R$ 500 por mês.
 
-O simulador mostra total investido, juros acumulados e patrimonio projetado mes a mes.
+- Crie uma alteração para **mês inicial 3**, **R$ 50**, **Por alguns meses → 2**.
+- Crie outra para **mês inicial 5**, **R$ 500**, **Até o fim**.
 
-### Eventos (aba superior)
+Nos meses 1–2 serão aportados R$ 100, nos meses 3–4 R$ 50 e do mês 5 em diante R$ 500. O investimento adicional pontual fica em **Aportes extras**, separado dos aportes recorrentes.
 
-Use a aba **Eventos** (ou o atalho **Eventos e aportes** na aba Simulador):
+### Ajustar os juros
 
-- **Mudancas de juros**: clique em **Adicionar**, informe o mes a partir do qual a nova taxa mensal deve valer e a propria taxa.
-- **Aportes extras**: informe o mes e o valor do aporte unico.
-- Para alterar ou retirar um evento use os botoes **Editar** e **Remover**.
+Em **EVENTOS → Juros**, repita o processo: informe o mês de início, a taxa mensal e a duração. É possível, por exemplo, aplicar 1,20% a.m. nos meses 1–6, depois 0,85% a.m. nos meses 7–9 e 1,00% a.m. dos meses 10 ao fim.
 
-Nao e necessario digitar expressoes do tipo `6:1,25;12:0,90`.
+A **taxa anual equivalente mostrada no SIMULADOR se refere à taxa mensal BASE**, não a uma rentabilidade anual consolidada quando há variações. Seu cálculo é `((1+taxa_mensal/100)^12-1)*100`.
 
-### Comparar
+### Como funcionam os períodos que se sobrepõem?
 
-Clique em **COMPARAR** no topo. Os dois botoes de selecao de cenarios alternam entre os cenarios disponiveis. O grafico mostra as curvas de patrimonio e os montantes finais. Quando os prazos diferem, a interface exibe um aviso.
+- Um período é **inclusivo**: início no mês 3 com duração de 2 meses vale para os meses 3 e 4.
+- Quando várias regras estiverem ativas no mesmo mês, **vence a que começou mais recentemente**.
+- Quando um período temporário acaba, o programa **retoma a regra anterior ainda ativa**. Se não houver uma regra anterior ativa, retorna ao valor BASE do cenário.
+- Uma alteração **Até o fim** continua ativa até o último mês, exceto enquanto outra regra mais recente estiver vigente.
+- Há no máximo uma regra por tipo com o mesmo mês inicial. Edite-a em vez de cadastrá-la duas vezes.
+- A duração deve caber no prazo do cenário. Se reduzir o prazo e algum evento ficar de fora, a alteração será rejeitada sem apagar os eventos.
 
-### Teclas
+### Salvamento e teclas
 
-| Tecla | Acao |
-| --- | --- |
-| Ctrl+S | Salvar |
-| Ctrl+A | Selecionar o conteudo do campo em edicao |
-| Tab | Ir ao proximo campo |
-| Enter | Confirmar a edicao atual |
-| Esc | Cancelar a edicao / fechar um dialogo |
-| F1 / F2 / F3 | Ir para Simulador / Eventos / Comparar |
-| Roda do mouse | Rolar a lista de cenarios ou de eventos |
+- **Ctrl+S:** salvar. **Enter:** confirmar a edição de um campo. **Tab:** ir ao próximo campo. **Esc:** cancelar edição/fechar diálogo.
+- **F1/F2/F3:** Simulador / Eventos / Comparar.
+- O programa também salva ao fechar normalmente, caso existam alterações válidas.
 
-## Dados e compatibilidade
+## Dados e migração
 
-O arquivo e armazenado em:
+Os cenários são armazenados localmente em:
 
 ```text
 ${XDG_DATA_HOME:-$HOME/.local/share}/invest/cenarios.tsv
 ```
 
-O aplicativo usa exatamente o **formato INVEST 2** da v0.2 e consegue abrir os dados da v0.1 e da v0.2 sem conversao manual. Na primeira gravacao de arquivo v0.1, cria o backup `cenarios.tsv.v1.bak`. Grava as alteracoes por substituicao atomica.
+O formato interno passou a **INVEST 3**, pois agora salva intervalos com mês inicial e final. A v0.3.2 abre cenários das versões v0.1, v0.2, v0.3 e v0.3.1 e migra os dados na gravação. A primeira migração cria um backup do arquivo anterior:
 
-**Aviso importante:** se encontrar dados invalidos ou danificados, o programa nao os sobrescreve. Ele informa o problema no terminal e nao abre ate o arquivo ser verificado ou recuperado.
+- De arquivo `INVEST 1`: `cenarios.tsv.v1.bak`.
+- De arquivo `INVEST 2`: `cenarios.tsv.v2.bak`.
 
-## Convencoes do calculo
+**Atenção:** versões anteriores do aplicativo **não leem o formato INVEST 3**. Antes de testar a v0.3.2, é prudente copiar também a pasta `~/.local/share/invest` (ou seu `XDG_DATA_HOME`) para outro local.
 
-O saldo inicial rende juros em cada mes; no fim do mes, ocorrem o aporte mensal e os eventuais aportes extras. Uma mudanca de taxa tem efeito a partir do mes selecionado e se mantem ate a proxima mudanca. O montante e **nominal e bruto**: nao inclui impostos, taxas, inflacao ou variacao de indexadores externos.
+A gravação usa arquivo temporário e troca atômica. Se um arquivo existente for inválido, o programa recusa abri-lo, evitando sobrescrevê-lo automaticamente.
 
-Para o exemplo padrao, com R$ 8.440,66 iniciais, R$ 1.000 por mes, 1,09% ao mes e 24 meses, o montante projetado e **R$ 38.212,22**.
+## Convenções e limitações
 
-## Limites
+- Juros são calculados em cada mês usando a taxa vigente; os aportes mensais e eventuais extras entram **no fim do mês**, depois dos juros.
+- São projeções **nominais e brutas**. Não há impostos, inflação, tarifas, CDI/IPCA em tempo real nem taxas futuras automaticamente previstas. Para simular um pós-fixado, informe hipóteses de taxas por período.
+- 1–600 meses, até 32 alterações de juros, 32 de aporte mensal e 32 aportes extras por cenário.
+- Taxas maiores que -100% e até 100% ao mês; valores entre R$ 0 e R$ 1 trilhão.
+- Os cálculos usam `double` e exibem centavos arredondados; não é um sistema contábil nem de negociação.
 
-- Ate 32 cenarios
-- Prazos de 1 a 600 meses
-- Ate 32 alteracoes de taxas e 32 aportes extras por cenario
-- A faixa de taxas por mes e maior que -100% e ate 100%
-- Valores monetarios sao simulados em ponto flutuante (`double`) e exibidos com duas casas decimais. Nao se trata de um sistema contabil ou de negociacao.
+Teste de referência: R$ 8.440,66 de capital inicial, R$ 1.000 mensais, 1,09% a.m. e 24 meses ⇒ **R$ 38.212,22**, sem eventos.
 
-## Observacoes de projeto
-
-A interface usa a paleta original da v0.2: barra superior e painel lateral escuros, conteudo cinza claro e botoes verdes. E implementada com primitivas Xlib e fontes X11, sem toolkit; foi projetada prioritariamente para uso com mouse e teclado em monitores desktop. Os campos de entrada sao simples: para modificar um numero, clique no campo, digite o valor e pressione Enter. Caso use Wayland puro, e necessario ter XWayland habilitado.
-
-## Testes
-
-```sh
-make test
-```
-
-Valida formulas com e sem eventos, limites, compatibilidade e armazenamento seguro.
-
-Codigo-fonte sob licenca MIT. Nao constitui aconselhamento financeiro.
+Código-fonte sob licença MIT. O programa não constitui aconselhamento financeiro.

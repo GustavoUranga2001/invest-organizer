@@ -11,9 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Invest v0.3: janela X11 nativa, campos e botoes desenhados diretamente.
+/* Invest v0.3.2: janela X11 nativa, campos e botoes desenhados diretamente.
  * Nao ha toolkit, browser, rede ou formatos proprietarios. */
-#define APP_TITLE "invest 0.3.1"
+#define APP_TITLE "invest 0.3.2"
 #define SIDE 242
 #define MAX_CLICKS 240
 #define MAX_EDIT 128
@@ -28,12 +28,12 @@ typedef enum {
 } Color;
 typedef enum { SIMULATE, EVENTS, COMPARE } AppView;
 typedef enum { MODAL_NONE, MODAL_EVENT_EDIT, MODAL_CONFIRM } Modal;
-typedef enum { F_NONE = -1, F_NAME, F_INITIAL, F_MONTHLY, F_RATE, F_MONTHS, F_EVENT_MONTH, F_EVENT_VALUE } Field;
+typedef enum { F_NONE = -1, F_NAME, F_INITIAL, F_MONTHLY, F_RATE, F_MONTHS, F_EVENT_MONTH, F_EVENT_VALUE, F_EVENT_DURATION } Field;
 typedef enum {
     A_NOTHING, A_SCREEN_SIM, A_SCREEN_EVENTS, A_SCREEN_COMPARE, A_NEW, A_DUPLICATE, A_DELETE,
-    A_CHOOSE, A_SAVE, A_OPEN_EVENTS, A_CLOSE_MODAL, A_EVENT_RATE_TAB,
+    A_CHOOSE, A_SAVE, A_OPEN_EVENTS, A_CLOSE_MODAL, A_EVENT_RATE_TAB, A_EVENT_MONTHLY_TAB,
     A_EVENT_EXTRA_TAB, A_EVENT_NEW, A_EVENT_EDIT, A_EVENT_DELETE, A_EVENT_SAVE,
-    A_EVENT_CANCEL, A_CONFIRM_OK, A_CONFIRM_CANCEL, A_CMP_A, A_CMP_B,
+    A_EVENT_CANCEL, A_EVENT_FOREVER, A_EVENT_TEMP, A_CONFIRM_OK, A_CONFIRM_CANCEL, A_CMP_A, A_CMP_B,
     A_FIELD, A_LIST_PREV, A_LIST_NEXT, A_EVENTS_PREV, A_EVENTS_NEXT
 } Action;
 typedef enum { CONFIRM_SCENARIO, CONFIRM_EVENT } ConfirmKind;
@@ -56,6 +56,7 @@ typedef struct {
     ConfirmKind confirm;
     enum InvestScheduleType event_type;
     int event_edit_index; /* -1 = novo */
+    int event_limited; /* 0 = ate o fim; 1 = por N meses */
     int event_scroll;
     int sidebar_scroll;
     int cmp_a,cmp_b;
@@ -241,39 +242,70 @@ static void get_field_text(Field f,char*out,size_t n) {
         case F_RATE:number(s->rate_percent,out,n);break;
         case F_MONTHS:snprintf(out,n,"%d",s->months);break;
         case F_EVENT_MONTH: {
-            const InvestEvent*arr=app.event_type==INVEST_RATES?s->rates:s->extras;
+            const InvestEvent*arr=app.event_type==INVEST_RATES?s->rates:
+                                   app.event_type==INVEST_MONTHLY?s->monthlies:s->extras;
             if(app.event_edit_index>=0)snprintf(out,n,"%d",arr[app.event_edit_index].month);
             else out[0]=0;
             break;
         }
         case F_EVENT_VALUE: {
-            const InvestEvent*arr=app.event_type==INVEST_RATES?s->rates:s->extras;
+            const InvestEvent*arr=app.event_type==INVEST_RATES?s->rates:
+                                   app.event_type==INVEST_MONTHLY?s->monthlies:s->extras;
             if(app.event_edit_index>=0)number(arr[app.event_edit_index].value,out,n);
             else out[0]=0;
+            break;
+        }
+        case F_EVENT_DURATION: {
+            const InvestEvent *arr=app.event_type==INVEST_RATES?s->rates:
+                                   app.event_type==INVEST_MONTHLY?s->monthlies:s->extras;
+            if(app.event_edit_index>=0 && arr[app.event_edit_index].end_month>0)
+                snprintf(out,n,"%d",arr[app.event_edit_index].end_month-arr[app.event_edit_index].month+1);
+            else snprintf(out,n,"2");
             break;
         }
         default:out[0]=0;
     }
 }
 /* O editor de eventos mantem valores em strings independentes. */
-static char event_month_text[MAX_EDIT],event_value_text[MAX_EDIT];
+static char event_month_text[MAX_EDIT],event_value_text[MAX_EDIT],event_duration_text[MAX_EDIT];
 static void event_editor_load(void){
     get_field_text(F_EVENT_MONTH,event_month_text,sizeof(event_month_text));
     get_field_text(F_EVENT_VALUE,event_value_text,sizeof(event_value_text));
+    get_field_text(F_EVENT_DURATION,event_duration_text,sizeof(event_duration_text));
+    if(app.event_type==INVEST_EXTRAS) app.event_limited=0;
+    else if(app.event_edit_index<0) app.event_limited=0;
+    else {
+        const InvestEvent *arr=app.event_type==INVEST_RATES?current()->rates:current()->monthlies;
+        app.event_limited=arr[app.event_edit_index].end_month>0;
+    }
+}
+static InvestEvent *get_events(Scenario *s, enum InvestScheduleType type,
+                               int **count)
+{
+    if(type==INVEST_RATES){*count=&s->rate_count;return s->rates;}
+    if(type==INVEST_MONTHLY){*count=&s->monthly_count;return s->monthlies;}
+    *count=&s->extra_count;return s->extras;
 }
 static int update_event(void) {
     Scenario candidate=*current();
-    InvestEvent *arr=app.event_type==INVEST_RATES?candidate.rates:candidate.extras;
-    int *count=app.event_type==INVEST_RATES?&candidate.rate_count:&candidate.extra_count;
-    InvestEvent e;int i,pos;
+    int *count, i, pos, duration;
+    InvestEvent *arr=get_events(&candidate,app.event_type,&count);
+    InvestEvent e={0};
     if(parse_month(event_month_text,&e.month)<0||parse_number(event_value_text,&e.value)<0){
-        status("Preencha o mes e o valor corretamente.",1);return -1;
+        status("Informe o mes e o valor corretamente.",1);return -1;
     }
-    if(e.month>candidate.months) {status("O mes nao pode ultrapassar o prazo do cenario.",1);return -1;}
+    if(e.month>candidate.months){status("O mes ultrapassa o prazo do cenario.",1);return -1;}
+    if(app.event_type!=INVEST_EXTRAS&&app.event_limited){
+        if(parse_month(event_duration_text,&duration)<0 ||
+           duration>candidate.months-e.month+1){
+            status("Duracao invalida: verifique o prazo do cenario.",1);return -1;
+        }
+        e.end_month=e.month+duration-1;
+    }
     if(app.event_type==INVEST_RATES && !(e.value>-100.0&&e.value<=100.0)){
         status("A taxa deve estar acima de -100% e ate 100%.",1);return -1;
     }
-    if(app.event_type==INVEST_EXTRAS && (e.value<0||e.value>1e12)){
+    if(app.event_type!=INVEST_RATES && (e.value<0||e.value>1e12)){
         status("Informe um aporte entre zero e 1 trilhao.",1);return -1;
     }
     if(app.event_edit_index>=0){
@@ -282,22 +314,24 @@ static int update_event(void) {
     }
     if(*count>=INVEST_MAX_EVENTS){status("Limite de 32 eventos por tipo.",1);return -1;}
     pos=0;while(pos<*count&&arr[pos].month<e.month)pos++;
-    if(pos<*count&&arr[pos].month==e.month){status("Esse mes ja tem um evento desse tipo.",1);return -1;}
+    if(pos<*count&&arr[pos].month==e.month){
+        status("Esse mes ja tem uma regra desse tipo.",1);return -1;
+    }
     for(i=*count;i>pos;i--)arr[i]=arr[i-1];
     arr[pos]=e;(*count)++;
     if(!scenario_valid(&candidate)||project_scenario(&candidate,NULL,NULL,NULL)<0){
-        status("Evento invalido ou projecao fora de escala.",1);return -1;
+        status("Regra invalida ou projecao fora de escala.",1);return -1;
     }
     *current()=candidate;modified();app.modal=MODAL_NONE;
-    status("Evento atualizado.",0);return 0;
+    status("Regra atualizada.",0);return 0;
 }
 static void remove_event(void){
-    Scenario*s=current();InvestEvent*arr=app.event_type==INVEST_RATES?s->rates:s->extras;
-    int *count=app.event_type==INVEST_RATES?&s->rate_count:&s->extra_count;
+    Scenario *s=current();int *count;
+    InvestEvent *arr=get_events(s,app.event_type,&count);
     int i=app.event_edit_index;
     if(i<0||i>=*count)return;
     for(;i<*count-1;i++)arr[i]=arr[i+1];
-    (*count)--;modified();status("Evento removido.",0);
+    (*count)--;modified();status("Regra removida.",0);
 }
 static int apply_field(Field f,const char*text){
     Scenario candidate=*current();double v;int n;
@@ -329,6 +363,7 @@ static void begin_focus(Field f){
     app.focus=f;
     if(f==F_EVENT_MONTH)snprintf(buf,sizeof(buf),"%s",event_month_text);
     else if(f==F_EVENT_VALUE)snprintf(buf,sizeof(buf),"%s",event_value_text);
+    else if(f==F_EVENT_DURATION)snprintf(buf,sizeof(buf),"%s",event_duration_text);
     else get_field_text(f,buf,sizeof(buf));
     snprintf(app.input,sizeof(app.input),"%s",buf);
     app.caret=(int)strlen(app.input);app.sel_all=1;
@@ -338,6 +373,7 @@ static int end_focus(void){
     if(f==F_NONE)return 0;
     if(f==F_EVENT_MONTH)snprintf(event_month_text,sizeof(event_month_text),"%s",app.input);
     else if(f==F_EVENT_VALUE)snprintf(event_value_text,sizeof(event_value_text),"%s",app.input);
+    else if(f==F_EVENT_DURATION)snprintf(event_duration_text,sizeof(event_duration_text),"%s",app.input);
     else if(apply_field(f,app.input)<0)return -1;
     app.focus=F_NONE;app.sel_all=0;return 0;
 }
@@ -388,7 +424,7 @@ static void draw_header(void){
     Rect savebtn={app.w-159,18,132,38};
     fill((Rect){0,0,app.w,74},SIDE_BG);
     txt(22,46,"invest",WHITE,app.f_title);
-    txt(106,42,"v0.3.1",SIDE_TEXT,app.f_small);
+    txt(106,42,"v0.3.2",SIDE_TEXT,app.f_small);
     header_tab((Rect){251,17,131,39},"SIMULADOR",app.view==SIMULATE,A_SCREEN_SIM);
     header_tab((Rect){391,17,124,39},"EVENTOS",app.view==EVENTS,A_SCREEN_EVENTS);
     header_tab((Rect){524,17,132,39},"COMPARAR",app.view==COMPARE,A_SCREEN_COMPARE);
@@ -509,9 +545,9 @@ static void draw_sim(void){
             389,percent,GREEN,app.f_bold);
         txt(x+24+tw(s->rate_count?"Taxa base anual equivalente:":"Taxa anual equivalente:",app.f_small)+
             tw(percent,app.f_bold)+12,389,"% a.a.",GREEN,app.f_small);
-        if(s->rate_count||s->extra_count){
+        if(s->rate_count||s->monthly_count||s->extra_count){
             char changes[96];
-            snprintf(changes,sizeof(changes),"%d mudanca(s) | %d aporte(s) extra(s)",s->rate_count,s->extra_count);
+            snprintf(changes,sizeof(changes),"%d juros | %d mensais | %d extras",s->rate_count,s->monthly_count,s->extra_count);
             txt(x+31+half,389,changes,MUTED,app.f_small);
         }
     }
@@ -580,41 +616,55 @@ static Rect events_area(void){
 }
 static void draw_events(void){
     int x=SIDE+30,w=app.w-SIDE-60,i,n;
-    Scenario *s=current();Rect r=events_area();
-    const InvestEvent *arr=app.event_type==INVEST_RATES?s->rates:s->extras;
-    int count=app.event_type==INVEST_RATES?s->rate_count:s->extra_count;
+    Scenario *s=current();Rect r=events_area();int *countp;
+    const InvestEvent *arr=get_events(s,app.event_type,&countp);
+    int count=*countp;
     char heading[128],desc[200],val[80];
+    const char *title=app.event_type==INVEST_RATES?"Mudancas de juros":
+                      app.event_type==INVEST_MONTHLY?"Mudancas de aporte mensal":
+                      "Aportes extraordinarios";
     txt(x,119,"Eventos do cenario",INK,app.f_title);
-    txt(x,146,"Configure juros variaveis e aportes extras, quando precisar.",MUTED,app.f_normal);
+    txt(x,146,"Programe taxas e aportes temporarios ou permanentes.",MUTED,app.f_normal);
     card(r);
-    button((Rect){x+23,r.y+24,209,40},"Mudancas de juros",app.event_type==INVEST_RATES?1:0,A_EVENT_RATE_TAB,0);
-    button((Rect){x+243,r.y+24,199,40},"Aportes extras",app.event_type==INVEST_EXTRAS?1:0,A_EVENT_EXTRA_TAB,0);
-    line(x+23,r.y+80,x+w-23,r.y+80,BORDER);
-    txt(x+25,r.y+120,app.event_type==INVEST_RATES?"Mudancas de juros":"Aportes extraordinarios",INK,app.f_bold);
-    button((Rect){x+w-199,r.y+96,175,41},"+ Adicionar",1,A_EVENT_NEW,0);
-    txt(x+25,r.y+149,app.event_type==INVEST_RATES?
-        "Escolha o mes em que uma nova taxa comeca a valer.":
-        "Acrescente um valor somente no mes escolhido.",MUTED,app.f_small);
-    line(x+23,r.y+162,x+w-23,r.y+162,BORDER);
+    button((Rect){x+20,r.y+21,165,40},"Juros",app.event_type==INVEST_RATES?1:0,A_EVENT_RATE_TAB,0);
+    button((Rect){x+194,r.y+21,205,40},"Aportes mensais",app.event_type==INVEST_MONTHLY?1:0,A_EVENT_MONTHLY_TAB,0);
+    button((Rect){x+408,r.y+21,175,40},"Aportes extras",app.event_type==INVEST_EXTRAS?1:0,A_EVENT_EXTRA_TAB,0);
+    line(x+23,r.y+78,x+w-23,r.y+78,BORDER);
+    txt(x+25,r.y+115,title,INK,app.f_bold);
+    button((Rect){x+w-199,r.y+92,175,41},"+ Adicionar",1,A_EVENT_NEW,0);
+    txt(x+25,r.y+147,app.event_type==INVEST_RATES?
+        "Defina uma taxa por alguns meses ou ate o fim.":
+        app.event_type==INVEST_MONTHLY?
+        "Defina um novo aporte mensal por alguns meses ou ate o fim.":
+        "Acrescente um investimento uma unica vez.",MUTED,app.f_small);
+    line(x+23,r.y+161,x+w-23,r.y+161,BORDER);
     n=imax(1,(r.h-266)/65);
     if(app.event_scroll>imax(0,count-n))app.event_scroll=imax(0,count-n);
     if(count==0){
-        txt(x+29,r.y+220,"Nenhum evento cadastrado.",INK,app.f_bold);
-        txt(x+29,r.y+249,app.event_type==INVEST_RATES?
-            "A taxa mensal base sera usada durante todo o periodo.":
-            "Somente os aportes mensais serao considerados.",MUTED,app.f_normal);
+        txt(x+29,r.y+218,"Nenhuma alteracao cadastrada.",INK,app.f_bold);
+        txt(x+29,r.y+246,app.event_type==INVEST_RATES?
+            "A taxa base vale durante todo o periodo.":
+            app.event_type==INVEST_MONTHLY?
+            "O aporte base vale durante todo o periodo.":
+            "Nenhum aporte pontual foi adicionado.",MUTED,app.f_normal);
     }
     for(i=0;i<n&&i+app.event_scroll<count;i++){
         int idx=i+app.event_scroll;Rect item={x+23,r.y+172+i*65,w-46,58};
         rounded(item,7,LIGHT);
-        snprintf(heading,sizeof(heading),"Mes %d",arr[idx].month);
+        if(app.event_type==INVEST_EXTRAS)
+            snprintf(heading,sizeof(heading),"No mes %d",arr[idx].month);
+        else if(arr[idx].end_month==0)
+            snprintf(heading,sizeof(heading),"A partir do mes %d",arr[idx].month);
+        else
+            snprintf(heading,sizeof(heading),"Do mes %d ao %d",arr[idx].month,arr[idx].end_month);
         txt(item.x+17,item.y+23,heading,INK,app.f_bold);
         if(app.event_type==INVEST_RATES){
             number(arr[idx].value,val,sizeof(val));
-            snprintf(desc,sizeof(desc),"Nova taxa mensal: %s%%",val);
+            snprintf(desc,sizeof(desc),"Taxa mensal: %s%%",val);
         }else{
             money(arr[idx].value,val,sizeof(val));
-            snprintf(desc,sizeof(desc),"Aporte adicional: %s",val);
+            snprintf(desc,sizeof(desc),app.event_type==INVEST_MONTHLY?
+                     "Aporte mensal: %s":"Aporte unico: %s",val);
         }
         txt(item.x+17,item.y+44,desc,MUTED,app.f_small);
         button((Rect){item.x+item.w-220,item.y+11,94,36},"Editar",0,A_EVENT_EDIT,idx);
@@ -628,24 +678,43 @@ static void draw_events(void){
         text_right(x+w-27,r.y+r.h-54,heading,MUTED,app.f_small);
     }
     line(x+23,r.y+r.h-38,x+w-23,r.y+r.h-38,BORDER);
-    txt(x+25,r.y+r.h-15,"Os ajustes sao aplicados no mes escolhido.",MUTED,app.f_small);
+    txt(x+25,r.y+r.h-15,"Depois de um periodo temporario, vale a regra anterior.",MUTED,app.f_small);
 }
 static void draw_event_editor(void){
-    Rect r=modal_box();Rect d={r.x+90,r.y+76,r.w-180,430};char text[160];
+    Rect r=modal_box();Rect d={r.x+63,r.y+52,r.w-126,492};char text[160];
     card(r);card(d);
-    txt(d.x+25,d.y+45,app.event_edit_index<0?"Novo evento":"Editar evento",INK,app.f_title);
-    txt(d.x+25,d.y+73,app.event_type==INVEST_RATES?
-       "Altere os juros a partir do mes escolhido.":"Adicione um aporte unico ao patrimonio.",MUTED,app.f_normal);
+    txt(d.x+25,d.y+38,app.event_edit_index<0?"Nova alteracao":"Editar alteracao",INK,app.f_title);
+    txt(d.x+25,d.y+68,app.event_type==INVEST_RATES?
+       "Escolha quando os novos juros comecam.":
+       app.event_type==INVEST_MONTHLY?
+       "Escolha quando o novo aporte mensal comeca.":
+       "Defina um aporte extra para um unico mes.",MUTED,app.f_normal);
     snprintf(text,sizeof(text),"%s",event_month_text);
-    display_field((Rect){d.x+25,d.y+133,d.w-50,46},"Mes do evento",text,F_EVENT_MONTH,"mes");
+    display_field((Rect){d.x+25,d.y+114,d.w-50,43},
+                  app.event_type==INVEST_EXTRAS?"Mes do aporte":"Mes inicial",text,F_EVENT_MONTH,"mes");
     snprintf(text,sizeof(text),"%s",event_value_text);
-    display_field((Rect){d.x+25,d.y+227,d.w-50,46},
-                  app.event_type==INVEST_RATES?"Nova taxa de juros":"Valor do aporte",text,F_EVENT_VALUE,
-                  app.event_type==INVEST_RATES?"%":"R$");
-    snprintf(text,sizeof(text),"Duracao total: %d meses",current()->months);
-    txt(d.x+26,d.y+309,text,MUTED,app.f_small);
-    button((Rect){d.x+25,d.y+349,122,42},"Cancelar",0,A_EVENT_CANCEL,0);
-    button((Rect){d.x+d.w-165,d.y+349,140,42},"Salvar evento",1,A_EVENT_SAVE,0);
+    display_field((Rect){d.x+25,d.y+198,d.w-50,43},
+                  app.event_type==INVEST_RATES?"Nova taxa mensal":
+                  app.event_type==INVEST_MONTHLY?"Novo aporte mensal":"Aporte extra",
+                  text,F_EVENT_VALUE,app.event_type==INVEST_RATES?"%":"R$");
+    if(app.event_type!=INVEST_EXTRAS){
+        txt(d.x+25,d.y+267,"Por quanto tempo?",INK,app.f_bold);
+        button((Rect){d.x+25,d.y+283,190,39},"Ate o fim",app.event_limited?0:1,A_EVENT_FOREVER,0);
+        button((Rect){d.x+225,d.y+283,207,39},"Por alguns meses",app.event_limited?1:0,A_EVENT_TEMP,0);
+        if(app.event_limited){
+            snprintf(text,sizeof(text),"%s",event_duration_text);
+            display_field((Rect){d.x+25,d.y+362,225,43},"Duracao",text,F_EVENT_DURATION,"meses");
+            txt(d.x+272,d.y+389,"Depois, retoma a regra",MUTED,app.f_small);
+            txt(d.x+272,d.y+405,"anterior ainda vigente.",MUTED,app.f_small);
+        }else{
+            txt(d.x+25,d.y+365,"A nova regra vale ate o fim, exceto quando",MUTED,app.f_small);
+            txt(d.x+25,d.y+387,"outra alteracao estiver ativa.",MUTED,app.f_small);
+        }
+    }else{
+        txt(d.x+25,d.y+293,"Aporte unico: nao altera o aporte mensal regular.",MUTED,app.f_small);
+    }
+    button((Rect){d.x+25,d.y+432,122,42},"Cancelar",0,A_EVENT_CANCEL,0);
+    button((Rect){d.x+d.w-165,d.y+432,140,42},"Salvar",1,A_EVENT_SAVE,0);
 }
 static void draw_confirm(void){
     Rect outer=modal_box();Rect r={outer.x+110,outer.y+115,outer.w-220,286};
@@ -701,11 +770,14 @@ static void execute(Action a,int arg){
     case A_CLOSE_MODAL:app.modal=MODAL_NONE;status("",0);break;
     case A_EVENT_RATE_TAB:app.event_type=INVEST_RATES;app.event_scroll=0;status("",0);break;
     case A_EVENT_EXTRA_TAB:app.event_type=INVEST_EXTRAS;app.event_scroll=0;status("",0);break;
+    case A_EVENT_MONTHLY_TAB:app.event_type=INVEST_MONTHLY;app.event_scroll=0;status("",0);break;
     case A_EVENT_NEW:launch_event_editor(-1);break;
     case A_EVENT_EDIT:launch_event_editor(arg);break;
     case A_EVENT_DELETE:app.event_edit_index=arg;app.confirm=CONFIRM_EVENT;app.modal=MODAL_CONFIRM;break;
     case A_EVENT_SAVE:if(modal_is_edit){(void)update_event();}break;
     case A_EVENT_CANCEL:app.modal=MODAL_NONE;status("",0);break;
+    case A_EVENT_FOREVER:app.event_limited=0;status("",0);break;
+    case A_EVENT_TEMP:app.event_limited=1;status("",0);break;
     case A_CONFIRM_OK:
         if(app.confirm==CONFIRM_SCENARIO){scenario_remove();app.modal=MODAL_NONE;}
         else{remove_event();app.modal=MODAL_NONE;}
@@ -755,7 +827,10 @@ static void handle_key(XKeyEvent *ev){
     if(sym==XK_Return||sym==XK_KP_Enter){end_focus();return;}
     if(sym==XK_Tab){
         Field next=app.focus;
-        if(app.modal==MODAL_EVENT_EDIT)next=app.focus==F_EVENT_MONTH?F_EVENT_VALUE:F_EVENT_MONTH;
+        if(app.modal==MODAL_EVENT_EDIT)
+            next=app.focus==F_EVENT_MONTH?F_EVENT_VALUE:
+                 app.focus==F_EVENT_VALUE&&app.event_limited&&app.event_type!=INVEST_EXTRAS?
+                 F_EVENT_DURATION:F_EVENT_MONTH;
         else next=app.focus==F_INITIAL?F_MONTHLY:app.focus==F_MONTHLY?F_RATE:app.focus==F_RATE?F_MONTHS:F_INITIAL;
         begin_focus(next);return;
     }
