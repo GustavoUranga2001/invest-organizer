@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=invest
+GenericName=Simulador de investimentos
+Comment=Simule aportes, juros e diferentes cenarios financeiros
+Exec=invest
+Icon=accessories-calculator
+Terminal=false
+Categories=Office;Finance;
