@@ -7,6 +7,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+double annual_equivalent_rate(double monthly_percent)
+{
+    return 100.0 * (pow(1.0 + monthly_percent / 100.0, 12.0) - 1.0);
+}
+
 void scenario_default(Scenario *s)
 {
     memset(s, 0, sizeof(*s));

@@ -42,6 +42,9 @@ typedef struct {
 
 enum InvestScheduleType { INVEST_RATES, INVEST_EXTRAS };
 
+/* Taxa anual efetiva equivalente a uma taxa mensal constante, em percentuais.
+ * Ex.: 1,09% a.m. -> aproximadamente 13,8933% a.a. */
+double annual_equivalent_rate(double monthly_percent);
 void scenario_default(Scenario *s);
 int scenario_valid(const Scenario *s);
 /* Nao modifica o cenario. Cada vetor opcional tem s->months+1 elementos.

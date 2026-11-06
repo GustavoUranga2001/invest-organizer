@@ -19,6 +19,10 @@ int main(void)
     InvestEvent events[INVEST_MAX_EVENTS];
     char format[2048];
     int count;
+    /* Equivalencia anual de juros compostos (nao 12 x taxa mensal). */
+    assert(close_to(annual_equivalent_rate(1.09), 13.893347713));
+    assert(close_to(annual_equivalent_rate(0.0), 0.0));
+    assert(close_to(annual_equivalent_rate(2.0), 26.824179));
     scenario_default(&s);
     assert(scenario_valid(&s));
     assert(project_scenario(&s, &p, balances, principal) == 0);
