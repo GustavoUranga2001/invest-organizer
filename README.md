@@ -1,110 +1,105 @@
-# invest v0.3.2 — Linux
+# invest v0.3.3 — Linux
 
-Simulador de investimentos com interface gráfica nativa para Linux, em **C11 e Xlib**.
-Sem GTK, Qt, Electron, banco de dados, conta na nuvem ou conexão obrigatória à internet.
+Aplicativo financeiro minimalista em **C11 + Xlib**, para Linux com X11 ou XWayland.
+Sem GTK, Qt, Electron, banco de dados, contas online nem conexão obrigatória à internet.
 
-A v0.3.2 acrescenta **aportes mensais e taxas de juros temporários ou permanentes**, com formulários acessíveis pela aba **EVENTOS**. Mantém o tema escuro/verde, as três abas no topo, a taxa anual equivalente e a comparação de cenários da v0.3.1.
+A v0.3.3 preserva **Simulador**, **Eventos** e **Comparar** da v0.3.2 e acrescenta a aba **Finanças** (organização financeira pessoal).
 
-## Dependências
+## Instalar e executar
 
-- Linux com X11 (ou Wayland com XWayland habilitado)
-- `cc`/GCC, `make` e Xlib de desenvolvimento
-- Fontes X11 (recomendado: Helvetica; há fallback para `fixed`)
-
-**Arch Linux:**
+No **Arch Linux**:
 
 ```sh
 sudo pacman -S --needed base-devel libx11 xorg-fonts-misc xorg-fonts-75dpi
-```
-
-**Debian / Ubuntu:**
-
-```sh
-sudo apt install build-essential libx11-dev xfonts-base xfonts-75dpi
-```
-
-## Compilar, executar e testar
-
-```sh
+tar -xzf invest-v0.3.3-source.tar.gz
+cd invest-v0.3.3
 make
 make test
 ./invest
 ```
 
-Alternativa: `./run.sh`. Para instalar no menu de aplicativos:
+No **Debian/Ubuntu**, instale as dependências antes:
+
+```sh
+sudo apt install build-essential libx11-dev xfonts-base xfonts-75dpi
+```
+
+Para instalar o aplicativo no menu (após `make`):
 
 ```sh
 make install PREFIX="$HOME/.local"
 ```
 
-## O que há na interface
+Alternativamente, execute `./run.sh` na pasta do projeto.
 
-- **SIMULADOR:** nome, valor inicial, aporte mensal BASE, juros mensais BASE, prazo, taxa anual equivalente BASE, resultados e gráfico de patrimônio versus capital investido.
-- **EVENTOS:** três controles internos: **Juros**, **Aportes mensais**, **Aportes extras**.
-- **COMPARAR:** seleção de dois cenários com resultados e gráficos.
-- Lateral: criar, selecionar, duplicar e excluir cenários (máximo: 32).
+## Aba Finanças
 
-### Ajustar os aportes mensais
+A aba **FINANÇAS** representa um **mês típico**, com receitas e despesas recorrentes. O objetivo é calcular quanto sobra após pagar os gastos mensais planejados.
 
-1. Abra **EVENTOS → Aportes mensais → + Adicionar**.
-2. Informe o mês em que o novo aporte começa e o valor mensal desejado.
-3. Em **Por quanto tempo?**, escolha **Até o fim** ou **Por alguns meses**.
-4. Se escolheu um intervalo, informe sua duração em meses (o mês inicial conta como primeiro mês).
-5. Clique em **Salvar**. Use **Editar** ou **Remover** para alterar depois.
+1. Abra **FINANÇAS** (ou pressione **F4**).
+2. Selecione **Receitas** e clique em **+ Adicionar**. Informe uma descrição (por exemplo, `Salário`) e o valor mensal.
+3. Selecione **Despesas** e clique em **+ Adicionar**. Informe uma descrição, o valor mensal, a categoria e se é um gasto **fixo** ou **variável**.
+4. O aplicativo atualiza automaticamente as receitas, despesas e o saldo previsto, além do percentual da renda comprometida.
+5. Para corrigir os lançamentos, use **Editar** ou **Excluir**. Uma exclusão solicita confirmação.
+6. Salve com **Ctrl+S** ou o botão **Salvar**. Alterações válidas também são salvas ao fechar normalmente.
 
-**Exemplo:** aporte base de R$ 100 por mês; do mês 3 ao mês 4, R$ 50 por mês; a partir do mês 5, R$ 500 por mês.
+Categorias de despesas: Moradia, Alimentação, Transporte, Saúde, Educação, Lazer, Contas e Outros. Ao clicar no botão **Categoria**, o programa percorre essas opções.
 
-- Crie uma alteração para **mês inicial 3**, **R$ 50**, **Por alguns meses → 2**.
-- Crie outra para **mês inicial 5**, **R$ 500**, **Até o fim**.
+### Exemplo
 
-Nos meses 1–2 serão aportados R$ 100, nos meses 3–4 R$ 50 e do mês 5 em diante R$ 500. O investimento adicional pontual fica em **Aportes extras**, separado dos aportes recorrentes.
+| Item | Valor mensal |
+|---|---:|
+| Salário | R$ 4.500,00 |
+| Aluguel (fixa, Moradia) | R$ 1.800,00 |
+| Mercado (variável, Alimentação) | R$ 600,00 |
+| **Saldo previsto** | **R$ 2.100,00** |
 
-### Ajustar os juros
+Percentual comprometido: **53,3%** (R$ 2.400,00 / R$ 4.500,00).
 
-Em **EVENTOS → Juros**, repita o processo: informe o mês de início, a taxa mensal e a duração. É possível, por exemplo, aplicar 1,20% a.m. nos meses 1–6, depois 0,85% a.m. nos meses 7–9 e 1,00% a.m. dos meses 10 ao fim.
+**Importante:** os lançamentos são recorrentes, não um extrato bancário real, calendário de vencimentos ou histórico de transações. O orçamento não transfere automaticamente o saldo para aportes do simulador e não acessa bancos.
 
-A **taxa anual equivalente mostrada no SIMULADOR se refere à taxa mensal BASE**, não a uma rentabilidade anual consolidada quando há variações. Seu cálculo é `((1+taxa_mensal/100)^12-1)*100`.
+## Compatibilidade com a v0.3.2
 
-### Como funcionam os períodos que se sobrepõem?
-
-- Um período é **inclusivo**: início no mês 3 com duração de 2 meses vale para os meses 3 e 4.
-- Quando várias regras estiverem ativas no mesmo mês, **vence a que começou mais recentemente**.
-- Quando um período temporário acaba, o programa **retoma a regra anterior ainda ativa**. Se não houver uma regra anterior ativa, retorna ao valor BASE do cenário.
-- Uma alteração **Até o fim** continua ativa até o último mês, exceto enquanto outra regra mais recente estiver vigente.
-- Há no máximo uma regra por tipo com o mesmo mês inicial. Edite-a em vez de cadastrá-la duas vezes.
-- A duração deve caber no prazo do cenário. Se reduzir o prazo e algum evento ficar de fora, a alteração será rejeitada sem apagar os eventos.
-
-### Salvamento e teclas
-
-- **Ctrl+S:** salvar. **Enter:** confirmar a edição de um campo. **Tab:** ir ao próximo campo. **Esc:** cancelar edição/fechar diálogo.
-- **F1/F2/F3:** Simulador / Eventos / Comparar.
-- O programa também salva ao fechar normalmente, caso existam alterações válidas.
-
-## Dados e migração
-
-Os cenários são armazenados localmente em:
+Os cenários de investimento continuam no arquivo e no formato **INVEST 3** da versão anterior:
 
 ```text
 ${XDG_DATA_HOME:-$HOME/.local/share}/invest/cenarios.tsv
 ```
 
-O formato interno passou a **INVEST 3**, pois agora salva intervalos com mês inicial e final. A v0.3.2 abre cenários das versões v0.1, v0.2, v0.3 e v0.3.1 e migra os dados na gravação. A primeira migração cria um backup do arquivo anterior:
+O orçamento é salvo **separadamente** em:
 
-- De arquivo `INVEST 1`: `cenarios.tsv.v1.bak`.
-- De arquivo `INVEST 2`: `cenarios.tsv.v2.bak`.
+```text
+${XDG_DATA_HOME:-$HOME/.local/share}/invest/orcamento.tsv
+```
 
-**Atenção:** versões anteriores do aplicativo **não leem o formato INVEST 3**. Antes de testar a v0.3.2, é prudente copiar também a pasta `~/.local/share/invest` (ou seu `XDG_DATA_HOME`) para outro local.
+O novo arquivo usa o formato texto `INVEST_BUDGET 1` (tabulação/TSV), compatível com inspeção manual. Ele é criado apenas quando um orçamento é salvo. Os arquivos são gravados usando um temporário seguido de substituição atômica. Caso o orçamento existente seja inválido, o programa se recusa a carregá-lo para evitar sobrescrevê-lo.
 
-A gravação usa arquivo temporário e troca atômica. Se um arquivo existente for inválido, o programa recusa abri-lo, evitando sobrescrevê-lo automaticamente.
+**Dica:** faça uma cópia de segurança da pasta `~/.local/share/invest` antes de instalar uma nova versão.
 
-## Convenções e limitações
+## Simulador e eventos (mantidos)
 
-- Juros são calculados em cada mês usando a taxa vigente; os aportes mensais e eventuais extras entram **no fim do mês**, depois dos juros.
-- São projeções **nominais e brutas**. Não há impostos, inflação, tarifas, CDI/IPCA em tempo real nem taxas futuras automaticamente previstas. Para simular um pós-fixado, informe hipóteses de taxas por período.
-- 1–600 meses, até 32 alterações de juros, 32 de aporte mensal e 32 aportes extras por cenário.
-- Taxas maiores que -100% e até 100% ao mês; valores entre R$ 0 e R$ 1 trilhão.
-- Os cálculos usam `double` e exibem centavos arredondados; não é um sistema contábil nem de negociação.
+- **SIMULADOR (F1):** capital inicial, aporte mensal base, juros mensais base, taxa anual equivalente, prazo, resultado e gráfico.
+- **EVENTOS (F2):** taxas mensais e aportes recorrentes temporários/permanentes, além de aportes pontuais.
+- **COMPARAR (F3):** comparação de dois cenários de investimento.
+- **FINANÇAS (F4):** orçamento mensal (independente das projeções).
+- **Ctrl+S:** salvar; **Tab:** próximo campo; **Enter:** confirmar um campo; **Esc:** cancelar edição ou fechar o diálogo.
 
-Teste de referência: R$ 8.440,66 de capital inicial, R$ 1.000 mensais, 1,09% a.m. e 24 meses ⇒ **R$ 38.212,22**, sem eventos.
+Os cálculos do simulador são nominais e brutos; não incluem impostos, inflação nem projeções automáticas de CDI/IPCA. Juros são aplicados antes dos aportes ao final de cada mês.
 
-Código-fonte sob licença MIT. O programa não constitui aconselhamento financeiro.
+## Projeto
+
+```text
+src/
+  main.c       Interface gráfica nativa X11
+  finance.c    Projeções e regras de investimento
+  storage.c    Cenários e migração do formato INVEST
+  budget.c     Orçamento mensal e persistência independente
+tests/
+  test_finance.c
+  test_storage.c
+  test_budget.c
+```
+
+Os testes são executados com `make test`. Os valores monetários de orçamento são arredondados a centavos no cadastro e somados internamente em centavos inteiros no resumo. Não se trata de software de contabilidade ou negociação.
+
+Código-fonte sob licença MIT.

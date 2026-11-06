@@ -1,25 +1,17 @@
-# Historico de alteracoes
+# Histórico de versões
+
+## v0.3.3 — Aba Finanças
+
+- Nova aba **FINANÇAS** na barra superior, atalho F4.
+- Cadastro de múltiplas receitas mensais e despesas mensais, com edição e exclusão confirmada.
+- Classificação de despesas por categoria e por tipo (fixa ou variável).
+- Resumo mensal: receitas, despesas, saldo previsto, percentual de renda comprometida e totais fixos/variáveis.
+- Arquivo independente `orcamento.tsv` no mesmo diretório XDG de dados, com gravação atômica e validação.
+- Preservação integral da aba de Eventos, das regras temporárias/permanentes, da comparação de cenários, da taxa anual equivalente e da paleta anterior.
+- Novos testes automatizados para o orçamento: soma, categorias, persistência e rejeição de dados corrompidos.
 
 ## v0.3.2
 
-- Permite alteracoes **temporarias ou permanentes** das taxas mensais e dos aportes mensais.
-- Novo controle "Aportes mensais" na aba Eventos, separado dos aportes extras pontuais.
-- Formularios com opcoes "Ate o fim" e "Por alguns meses" e campo de duracao.
-- Periodos temporarios retomam a regra anterior ainda vigente ao terminar.
-- Regras iniciadas mais recentemente prevalecem quando ha sobreposicao.
-- Armazena cenarios no formato INVEST 3, compativel para leitura de INVEST 1 e 2.
-- Backup automatico da versao anterior antes da primeira migracao.
-- Testes de intervalos inclusivos, sobreposicoes, migracao, formatos e calculos.
-
-## v0.3.1
-
-- Recupera a paleta da v0.2: cabecalho e painel lateral escuros, acoes verdes.
-- Restaura as abas superiores Simulador, Eventos e Comparar.
-- Mostra a taxa efetiva anual equivalente imediatamente abaixo da mensal.
-- Mantem formulario simples para mudancas de juros e aportes extras.
-- Preserva os dados no formato INVEST 2, compativel com v0.2 e v0.3.
-- Adiciona teste para equivalencia de taxas e melhora a legibilidade do grafico em janelas menores.
-
-## v0.3.0
-
-- Layout com cartoes, eventos editaveis por formularios e comparacao.
+- Aportes mensais e taxas de juros temporários e permanentes.
+- Regras sobrepostas e retomada de valores anteriores ainda vigentes.
+- Compatibilidade com os cenários das versões anteriores.
