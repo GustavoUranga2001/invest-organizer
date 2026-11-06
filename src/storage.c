@@ -1,0 +1,229 @@
+#define _POSIX_C_SOURCE 200809L
+#include "storage.h"
+
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+static void fail(char *error, size_t size, const char *message)
+{
+    if (error && size) snprintf(error, size, "%s", message);
+}
+
+int storage_path(char *out, size_t size)
+{
+    const char *root = getenv("XDG_DATA_HOME");
+    const char *home = getenv("HOME");
+    int n;
+    if (root && *root && root[0] == '/')
+        n = snprintf(out, size, "%s/invest/cenarios.tsv", root);
+    else if (home && *home)
+        n = snprintf(out, size, "%s/.local/share/invest/cenarios.tsv", home);
+    else return -1;
+    return n >= 0 && (size_t)n < size ? 0 : -1;
+}
+
+static int create_parent(const char *path)
+{
+    char copy[PATH_MAX];
+    size_t i, n = strlen(path);
+    if (n >= sizeof(copy)) return -1;
+    memcpy(copy, path, n + 1);
+    for (i = 1; i < n; ++i) {
+        if (copy[i] != '/') continue;
+        copy[i] = 0;
+        if (mkdir(copy, 0700) < 0 && errno != EEXIST) return -1;
+        copy[i] = '/';
+    }
+    return 0;
+}
+
+static int parse_double(const char *s, double *out)
+{
+    char tail;
+    return sscanf(s, "%lf%c", out, &tail) == 1 ? 0 : -1;
+}
+
+static int parse_int(const char *s, int *out)
+{
+    char tail;
+    return sscanf(s, "%d%c", out, &tail) == 1 ? 0 : -1;
+}
+
+int storage_load(ScenarioStore *store, char *error, size_t size)
+{
+    char path[PATH_MAX], line[8192];
+    FILE *f;
+    int version, selected;
+    ScenarioStore result = {0};
+    if (!store || storage_path(path, sizeof(path)) < 0) {
+        fail(error, size, "Diretorio de dados indisponivel");
+        return -1;
+    }
+    f = fopen(path, "r");
+    if (!f && errno == ENOENT) {
+        memset(store, 0, sizeof(*store));
+        return 0;
+    }
+    if (!f) {
+        fail(error, size, "Nao foi possivel abrir arquivo de cenarios");
+        return -1;
+    }
+    if (!fgets(line, sizeof(line), f) ||
+        sscanf(line, "INVEST\t%d\t%d", &version, &selected) != 2 ||
+        (version != 1 && version != 2)) goto malformed;
+    while (fgets(line, sizeof(line), f)) {
+        char *fields[7], *cursor, *token;
+        Scenario s = {0};
+        int n = 0;
+        if (!strchr(line, '\n') && !feof(f)) goto malformed;
+        if (line[0] == '\n') continue;
+        if (result.count >= INVEST_MAX_SCENARIOS) goto malformed;
+        cursor = NULL;
+        token = strtok_r(line, "\t\r\n", &cursor);
+        while (token && n < 7) {
+            fields[n++] = token;
+            token = strtok_r(NULL, "\t\r\n", &cursor);
+        }
+        if (token || n != (version == 1 ? 5 : 7) ||
+            strlen(fields[0]) >= sizeof(s.name)) goto malformed;
+        snprintf(s.name, sizeof(s.name), "%s", fields[0]);
+        if (parse_double(fields[1], &s.initial) < 0 ||
+            parse_double(fields[2], &s.monthly) < 0 ||
+            parse_double(fields[3], &s.rate_percent) < 0 ||
+            parse_int(fields[4], &s.months) < 0) goto malformed;
+        if (version == 2 &&
+            (schedule_parse(fields[5], INVEST_RATES, s.months,
+                            s.rates, &s.rate_count) < 0 ||
+             schedule_parse(fields[6], INVEST_EXTRAS, s.months,
+                            s.extras, &s.extra_count) < 0)) goto malformed;
+        if (!scenario_valid(&s)) goto malformed;
+        result.items[result.count++] = s;
+    }
+    if (ferror(f)) goto malformed;
+    fclose(f);
+    result.selected = selected >= 0 && selected < result.count ? selected : 0;
+    *store = result;
+    return 0;
+malformed:
+    fclose(f);
+    fail(error, size, "Arquivo de cenarios invalido: original preservado");
+    return -1;
+}
+
+/* Na primeira migracao, guarda uma copia do arquivo v1 antes da substituicao. */
+static int backup_legacy(const char *path)
+{
+    char backup[PATH_MAX];
+    FILE *in, *out;
+    char header[64], buf[4096];
+    size_t n;
+    int rc = 0;
+    if (snprintf(backup, sizeof(backup), "%s.v1.bak", path) >=
+        (int)sizeof(backup)) return -1;
+    in = fopen(path, "rb");
+    if (!in) return errno == ENOENT ? 0 : -1;
+    if (!fgets(header, sizeof(header), in)) {
+        fclose(in);
+        return -1;
+    }
+    if (strncmp(header, "INVEST\t1\t", 9) != 0) {
+        fclose(in);
+        return 0;
+    }
+    if (access(backup, F_OK) == 0) {
+        fclose(in);
+        return 0;
+    }
+    rewind(in);
+    out = fopen(backup, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
+    if (ferror(in) || fflush(out) != 0 || fsync(fileno(out)) != 0) rc = -1;
+    if (fclose(out) != 0) rc = -1;
+    fclose(in);
+    if (rc) unlink(backup);
+    return rc;
+}
+
+int storage_save(const ScenarioStore *store, char *error, size_t size)
+{
+    char path[PATH_MAX], temp[PATH_MAX];
+    FILE *f;
+    int fd, i, n;
+    if (!store || store->count < 1 || store->count > INVEST_MAX_SCENARIOS ||
+        store->selected < 0 || store->selected >= store->count ||
+        storage_path(path, sizeof(path)) < 0 || create_parent(path) < 0) {
+        fail(error, size, "Diretorio ou cenarios invalidos");
+        return -1;
+    }
+    for (i = 0; i < store->count; ++i)
+        if (!scenario_valid(&store->items[i])) {
+            fail(error, size, "Cenario invalido; nada foi salvo");
+            return -1;
+        }
+    if (backup_legacy(path) < 0) {
+        fail(error, size, "Nao foi possivel guardar backup v0.1");
+        return -1;
+    }
+    n = snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", path);
+    if (n < 0 || (size_t)n >= sizeof(temp)) {
+        fail(error, size, "Caminho de dados muito longo");
+        return -1;
+    }
+    fd = mkstemp(temp);
+    if (fd < 0) {
+        fail(error, size, "Nao foi possivel criar arquivo temporario");
+        return -1;
+    }
+    f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        unlink(temp);
+        fail(error, size, "Erro de escrita");
+        return -1;
+    }
+    if (fprintf(f, "INVEST\t2\t%d\n", store->selected) < 0) goto failed;
+    for (i = 0; i < store->count; ++i) {
+        const Scenario *s = &store->items[i];
+        char rates[INVEST_MAX_EVENTS * 36 + 4];
+        char extras[INVEST_MAX_EVENTS * 36 + 4];
+        if (schedule_format(s->rates, s->rate_count, rates,
+                            sizeof(rates), 1) < 0 ||
+            schedule_format(s->extras, s->extra_count, extras,
+                            sizeof(extras), 1) < 0 ||
+            fprintf(f, "%s\t%.17g\t%.17g\t%.17g\t%d\t%s\t%s\n",
+                    s->name, s->initial, s->monthly, s->rate_percent,
+                    s->months, rates, extras) < 0) goto failed;
+    }
+    if (fflush(f) != 0 || fsync(fd) != 0) goto failed;
+    if (fclose(f) != 0) {
+        unlink(temp);
+        fail(error, size, "Falha ao fechar arquivo de dados");
+        return -1;
+    }
+    if (rename(temp, path) != 0) {
+        unlink(temp);
+        fail(error, size, "Falha ao substituir dados locais");
+        return -1;
+    }
+    return 0;
+failed:
+    fclose(f);
+    unlink(temp);
+    fail(error, size, "Falha ao salvar cenarios");
+    return -1;
+}
