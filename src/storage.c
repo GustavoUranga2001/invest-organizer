@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
+#include "utf8.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -96,7 +97,10 @@ int storage_load(ScenarioStore *store, char *error, size_t size)
         }
         if (token || n != (version == 1 ? 5 : version == 2 ? 7 : 8) ||
             strlen(fields[0]) >= sizeof(s.name)) goto malformed;
-        snprintf(s.name, sizeof(s.name), "%s", fields[0]);
+        /* Repara em memoria nomes com bytes UTF-8 incompletos gravados por
+         * versoes antigas. O arquivo original so muda apos salvar, e nesse
+         * momento cenarios.tsv.bak preserva seus bytes originais. */
+        utf8_clean(s.name, sizeof(s.name), fields[0]);
         if (parse_double(fields[1], &s.initial) < 0 ||
             parse_double(fields[2], &s.monthly) < 0 ||
             parse_double(fields[3], &s.rate_percent) < 0 ||
@@ -222,7 +226,8 @@ int storage_save(const ScenarioStore *store, char *error, size_t size)
         return -1;
     }
     for (i = 0; i < store->count; ++i)
-        if (!scenario_valid(&store->items[i])) {
+        if (!scenario_valid(&store->items[i]) ||
+            !utf8_valid(store->items[i].name)) {
             fail(error, size, "Cenario invalido; nada foi salvo");
             return -1;
         }

@@ -6,23 +6,29 @@ CPPFLAGS = -Isrc
 CAIRO_CFLAGS = $(shell pkg-config --cflags cairo)
 CAIRO_LIBS = $(shell pkg-config --libs cairo)
 LDLIBS = -lX11 $(CAIRO_LIBS) -lm
-SRC = src/main.c src/finance.c src/storage.c src/budget.c
+SRC = src/main.c src/finance.c src/storage.c src/budget.c src/utf8.c src/compose.c src/monthly.c
 
 all: invest
 
-invest: $(SRC) src/finance.h src/storage.h src/budget.h
+invest: $(SRC) src/finance.h src/storage.h src/budget.h src/utf8.h src/compose.h src/monthly.h
 	$(CC) $(CPPFLAGS) $(CAIRO_CFLAGS) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
-test: tests/test_finance.c tests/test_storage.c tests/test_budget.c src/finance.c src/storage.c src/budget.c
+test: tests/test_monthly.c src/monthly.c src/monthly.h tests/test_finance.c tests/test_storage.c tests/test_budget.c tests/test_utf8.c tests/test_compose.c src/finance.c src/storage.c src/budget.c src/utf8.c src/compose.c src/monthly.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-finance tests/test_finance.c src/finance.c -lm
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-storage tests/test_storage.c src/finance.c src/storage.c -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-storage tests/test_storage.c src/finance.c src/storage.c src/utf8.c -lm
 	./test-finance
 	./test-storage
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-budget tests/test_budget.c src/budget.c -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-budget tests/test_budget.c src/budget.c src/utf8.c -lm
 	./test-budget
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-utf8 tests/test_utf8.c src/utf8.c
+	./test-utf8
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-compose tests/test_compose.c src/compose.c src/utf8.c
+	./test-compose
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-monthly tests/test_monthly.c src/monthly.c src/budget.c src/utf8.c -lm
+	./test-monthly
 
 clean:
-	rm -f invest test-finance test-storage test-budget
+	rm -f invest test-finance test-storage test-budget test-utf8 test-compose test-monthly
 
 PREFIX = /usr/local
 

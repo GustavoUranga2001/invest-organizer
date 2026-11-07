@@ -93,6 +93,25 @@ int main(void)
     assert(f && fgets(buf, sizeof(buf), f));
     assert(strncmp(buf, "INVEST\t2\t", 9) == 0);
     fclose(f);
+    /* Recupera byte incompleto em nome legado, sem perder parametros.
+     * O arquivo original permanece em .bak quando a correção e salva. */
+    f = fopen(path,"wb");
+    assert(f);
+    assert(fputs("INVEST\t3\t0\nPlano",f)>0);
+    assert(fputc(0xC3,f)!=EOF); /* metade de um UTF-8 acentuado */
+    assert(fputs("\t8440.66\t1000\t1.09\t24\t-\t-\t-\n",f)>0);
+    assert(fclose(f)==0);
+    assert(storage_load(&restored,error,sizeof(error))==0);
+    assert(strcmp(restored.items[0].name,"Plano?")==0);
+    assert(restored.items[0].initial==8440.66 && restored.items[0].monthly==1000);
+    assert(storage_save(&restored,error,sizeof(error))==0);
+    f=fopen(current_bak,"rb");assert(f);
+    { size_t got=fread(buf,1,sizeof(buf),f);int saw=0;
+      for(size_t i=0;i<got;i++)if((unsigned char)buf[i]==0xC3)saw=1;
+      assert(saw); }
+    fclose(f);
+    assert(storage_load(&restored,error,sizeof(error))==0);
+    assert(strcmp(restored.items[0].name,"Plano?")==0);
     /* Arquivo corrompido deve falhar em vez de descartar linhas. */
     f = fopen(path, "w");
     assert(f);

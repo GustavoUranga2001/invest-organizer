@@ -79,6 +79,18 @@ int main(void){
     assert(budget_load(&copy,err,sizeof(err))==0);
     near(copy.monthly_investment,400.00);
     assert(copy.count==1);
+    /* Nomes de lancamentos antigos com UTF-8 truncado sao recuperados. */
+    f=fopen(path,"wb");assert(f);
+    assert(fputs("INVEST_BUDGET\t2\nINVESTMENT\t0.00\n",f)>0);
+    assert(fputs("0\tSal",f)>0 && fputc(0xC3,f)!=EOF);
+    assert(fputs("\t3000.00\t7\t1\n",f)>0);
+    assert(fclose(f)==0);
+    {
+        BudgetStore repaired={0};
+        assert(budget_load(&repaired,err,sizeof(err))==0);
+        assert(repaired.count==1 && strcmp(repaired.items[0].name,"Sal?")==0);
+        near(repaired.items[0].amount,3000.0);
+    }
     /* Arquivo v2 invalido nao pode sobrescrever o orcamento em memoria. */
     f=fopen(path,"w");assert(f);
     assert(fputs("INVEST_BUDGET\t2\nINVESTMENT\t-1.00\n",f)>0);

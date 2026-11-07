@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "budget.h"
+#include "utf8.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -28,7 +29,7 @@ int budget_valid_item(const BudgetItem *item) {
     if(!item)return 0;
     len=strnlen(item->name,sizeof(item->name));
     if(len<1 || len>=sizeof(item->name) ||
-       strpbrk(item->name,"\n\r\t") ||
+       !utf8_valid(item->name) || strpbrk(item->name,"\n\r\t") ||
        !isfinite(item->amount) || item->amount<0.0 || item->amount>1e12 ||
        (item->kind!=BUDGET_INCOME && item->kind!=BUDGET_EXPENSE) ||
        item->category<0 || item->category>=BUDGET_CATEGORY_COUNT ||
@@ -127,7 +128,8 @@ int budget_load(BudgetStore *store,char *err,size_t err_size){
            parse_int_strict(fields[3],&cat)<0||
            parse_int_strict(fields[4],&fixed)<0)goto invalid;
         item.kind=(BudgetKind)kind;item.category=cat;item.fixed=fixed;
-        snprintf(item.name,sizeof(item.name),"%s",fields[1]);
+        /* Evita nomes legados quebrados tambem na aba Financas. */
+        utf8_clean(item.name,sizeof(item.name),fields[1]);
         if(!budget_valid_item(&item))goto invalid;
         tmp.items[tmp.count++]=item;
     }

@@ -2,6 +2,10 @@
 #include "finance.h"
 #include "storage.h"
 #include "budget.h"
+#include "monthly.h"
+#include <time.h>
+#include "utf8.h"
+#include "compose.h"
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -9,14 +13,15 @@
 #include <cairo/cairo-xlib.h>
 #include <ctype.h>
 #include <errno.h>
+#include <locale.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Invest v0.3.6: X11 nativo com Cairo para tipografia e curvas antialias.
+/* Invest v0.3.9: X11 nativo com Cairo para tipografia e curvas antialias.
  * Sem GTK, Qt, browser, rede ou formatos proprietarios. */
-#define APP_TITLE "invest 0.3.6"
+#define APP_TITLE "invest 0.3.9"
 #define SIDE 242
 #define MAX_CLICKS 240
 #define MAX_EDIT 128
@@ -41,7 +46,8 @@ typedef enum {
     A_FIELD, A_LIST_PREV, A_LIST_NEXT, A_EVENTS_PREV, A_EVENTS_NEXT,
     A_BUDGET_INCOME, A_BUDGET_EXPENSE, A_BUDGET_NEW, A_BUDGET_EDIT, A_BUDGET_DELETE,
     A_BUDGET_CATEGORY, A_BUDGET_FIXED, A_BUDGET_VARIABLE, A_BUDGET_SAVE, A_BUDGET_CANCEL,
-    A_BUDGET_PREV, A_BUDGET_NEXT, A_INVESTMENT_EDIT, A_INVESTMENT_SAVE, A_INVESTMENT_CANCEL
+    A_BUDGET_PREV, A_BUDGET_NEXT, A_INVESTMENT_EDIT, A_INVESTMENT_SAVE, A_INVESTMENT_CANCEL,
+    A_MONTH_PREV, A_MONTH_NEXT, A_MONTH_PLAN, A_MONTH_ACTUAL, A_MONTH_COPY, A_MONTH_YEAR, A_MONTH_CHART
 } Action;
 typedef enum { CONFIRM_SCENARIO, CONFIRM_EVENT, CONFIRM_BUDGET } ConfirmKind;
 
@@ -49,6 +55,9 @@ typedef struct { Rect box; Action action; int arg; } Hit;
 
 typedef struct {
     Display *dpy;
+    XIM im;
+    XIC ic;
+    char dead_pending; /* acento aguardando composicao em campo de texto */
     Window win;
     int screen;
     GC gc;
@@ -59,7 +68,10 @@ typedef struct {
     cairo_t *cr;
     int w,h,running,dirty,budget_dirty;
     ScenarioStore store;
-    BudgetStore budget;
+    BudgetStore budget; /* Active planned or actual budget. */
+    MonthlyBudget monthly;
+    int budget_year, budget_month, budget_mode; /* 0 planned, 1 actual */
+    int year_view, chart_metric;
     BudgetKind budget_filter;
     int budget_edit_index,budget_category,budget_fixed,budget_scroll;
     AppView view;
@@ -149,13 +161,19 @@ static void txt(int x,int y,const char *s,Color color,AppFont *font) {
     source_color(color);
     cairo_move_to(app.cr,x,y);
     /* Cairo accepts UTF-8 directly, including accents and currency symbols. */
-    cairo_show_text(app.cr,s);
+    /* Cairo entra num estado de erro persistente com texto UTF-8 quebrado.
+     * Sanitizar aqui impede que uma string ruim apague a interface inteira. */
+    char safe[4096];
+    utf8_clean(safe,sizeof(safe),s);
+    cairo_show_text(app.cr,safe);
 }
 static int tw(const char *s,AppFont *f) {
     cairo_text_extents_t ext;
     if(!s||!f)return 0;
     font_set(f);
-    cairo_text_extents(app.cr,s,&ext);
+    char safe[4096];
+    utf8_clean(safe,sizeof(safe),s);
+    cairo_text_extents(app.cr,safe,&ext);
     return (int)ceil(ext.x_advance);
 }
 static void text_right(int x,int y,const char*s,Color c,AppFont*f){txt(x-tw(s,f),y,s,c,f);}
@@ -163,7 +181,7 @@ static void text_center(Rect r,int y,const char*s,Color c,AppFont*f){txt(r.x+(r.
 static void cut_text(char *target,size_t n,const char *s,int px,AppFont*f) {
     size_t k;
     if(!n)return;
-    snprintf(target,n,"%s",s);
+    utf8_clean(target,n,s);
     if(tw(target,f)<=px)return;
     k=strlen(target);
     while(k>0 && tw(target,f)+tw("...",f)>px){
@@ -216,13 +234,64 @@ static int save(void) {
         app.dirty=0;
     }
     if(app.budget_dirty){
-        if(budget_save(&app.budget,err,sizeof(err))<0){status(err,1);return -1;}
+        if(app.budget_mode)app.monthly.actual=app.budget;
+        else app.monthly.planned=app.budget;
+        if(monthly_save(app.budget_year,app.budget_month,&app.monthly,err,sizeof(err))<0){
+            status(err,1);return -1;
+        }
         app.budget_dirty=0;
     }
-    status("Alteracoes salvas",0);return 0;
+    status("Alterações salvas",0);return 0;
 }
 static void modified(void){app.dirty=1;}
-static void budget_modified(void){app.budget_dirty=1;}
+static void budget_modified(void){
+    if(app.budget_mode)app.monthly.actual=app.budget;
+    else app.monthly.planned=app.budget;
+    app.budget_dirty=1;
+}
+static void month_mode_set(int mode){
+    if(mode==app.budget_mode)return;
+    if(app.budget_mode)app.monthly.actual=app.budget;
+    else app.monthly.planned=app.budget;
+    app.budget_mode=mode;
+    app.budget=mode?app.monthly.actual:app.monthly.planned;
+    app.budget_scroll=0;
+    status("",0);
+}
+static int month_open(int year,int month){
+    MonthlyBudget next;char err[200];int rc;
+    if(year<1900||year>2200||month<1||month>12)return -1;
+    if(save()<0)return -1;
+    rc=monthly_load(year,month,&next,err,sizeof(err));
+    if(rc<0){status(err,1);return -1;}
+    app.monthly=next;app.budget_year=year;app.budget_month=month;
+    app.budget=app.budget_mode?app.monthly.actual:app.monthly.planned;
+    app.budget_scroll=0;
+    status(rc==1?"Mês sem registros. Use + Adicionar ou Copiar anterior.":"",0);
+    return 0;
+}
+static void month_shift(int delta){
+    int y=app.budget_year,m=app.budget_month+delta;
+    if(m<1){m=12;y--;}if(m>12){m=1;y++;}
+    (void)month_open(y,m);
+}
+static void month_copy_previous(void){
+    int m=app.budget_month-1,y=app.budget_year,rc;MonthlyBudget prev;char err[200];
+    BudgetTotals totals;
+    if(app.budget_mode){status("Mude para Planejado antes de copiar.",1);return;}
+    if(app.budget.count||app.budget.monthly_investment>0.0){
+        status("O planejamento deste mês já tem dados; cópia cancelada.",1);return;
+    }
+    if(m<1){m=12;y--;}
+    rc=monthly_load(y,m,&prev,err,sizeof(err));
+    if(rc<0){status(err,1);return;}
+    if(rc==1||(prev.planned.count==0&&prev.planned.monthly_investment==0)){
+        status("O mês anterior não tem planejamento para copiar.",1);return;
+    }
+    if(budget_totals(&prev.planned,&totals)<0){status("Orçamento anterior inválido.",1);return;}
+    app.budget=prev.planned;budget_modified();app.budget_scroll=0;
+    status("Planejamento copiado; ajuste os valores deste mês.",0);
+}
 static int add_hit(Rect r,Action a,int arg) {
     if(app.hit_n>=MAX_CLICKS)return -1;
     app.hits[app.hit_n++]=(Hit){r,a,arg};return 0;
@@ -236,6 +305,7 @@ static void button(Rect r,const char*title,int style,Action action,int arg) {
     text_center(r,r.y+r.h/2+5,clipped,fg,app.f_bold);
     add_hit(r,action,arg);
 }
+static void reset_dead_composition(void);
 static void begin_focus(Field f);
 static int end_focus(void);
 static void display_field(Rect r,const char*name,const char*value,Field field,const char *suffix) {
@@ -322,13 +392,13 @@ static int update_event(void) {
     InvestEvent *arr=get_events(&candidate,app.event_type,&count);
     InvestEvent e={0};
     if(parse_month(event_month_text,&e.month)<0||parse_number(event_value_text,&e.value)<0){
-        status("Informe o mes e o valor corretamente.",1);return -1;
+        status("Informe o mês e o valor corretamente.",1);return -1;
     }
-    if(e.month>candidate.months){status("O mes ultrapassa o prazo do cenario.",1);return -1;}
+    if(e.month>candidate.months){status("O mês ultrapassa o prazo do cenário.",1);return -1;}
     if(app.event_type!=INVEST_EXTRAS&&app.event_limited){
         if(parse_month(event_duration_text,&duration)<0 ||
            duration>candidate.months-e.month+1){
-            status("Duracao invalida: verifique o prazo do cenario.",1);return -1;
+            status("Duração inválida: verifique o prazo do cenário.",1);return -1;
         }
         e.end_month=e.month+duration-1;
     }
@@ -345,12 +415,12 @@ static int update_event(void) {
     if(*count>=INVEST_MAX_EVENTS){status("Limite de 32 eventos por tipo.",1);return -1;}
     pos=0;while(pos<*count&&arr[pos].month<e.month)pos++;
     if(pos<*count&&arr[pos].month==e.month){
-        status("Esse mes ja tem uma regra desse tipo.",1);return -1;
+        status("Esse mês já tem uma regra desse tipo.",1);return -1;
     }
     for(i=*count;i>pos;i--)arr[i]=arr[i-1];
     arr[pos]=e;(*count)++;
     if(!scenario_valid(&candidate)||project_scenario(&candidate,NULL,NULL,NULL)<0){
-        status("Regra invalida ou projecao fora de escala.",1);return -1;
+        status("Regra inválida ou projeção fora de escala.",1);return -1;
     }
     *current()=candidate;modified();app.modal=MODAL_NONE;
     status("Regra atualizada.",0);return 0;
@@ -366,7 +436,7 @@ static void remove_event(void){
 static int apply_field(Field f,const char*text){
     Scenario candidate=*current();double v;int n;
     if(f==F_NAME){
-        if(!text[0]||strlen(text)>=sizeof(candidate.name)||strchr(text,'\t')||strchr(text,'\n')){
+        if(!text[0]||!utf8_valid(text)||strlen(text)>=sizeof(candidate.name)||strchr(text,'\t')||strchr(text,'\n')){
             status("Use um nome de 1 a 63 caracteres.",1);return -1;
         }
         snprintf(candidate.name,sizeof(candidate.name),"%s",text);
@@ -380,7 +450,7 @@ static int apply_field(Field f,const char*text){
         if(f==F_RATE)candidate.rate_percent=v;
     }
     if(!scenario_valid(&candidate)||project_scenario(&candidate,NULL,NULL,NULL)<0){
-        status("Valor invalido, prazo incompativel ou projecao fora de escala.",1);
+        status("Valor inválido, prazo incompatível ou projeção fora de escala.",1);
         return -1;
     }
     if(memcmp(&candidate,current(),sizeof(candidate))){*current()=candidate;modified();}
@@ -416,7 +486,7 @@ static int update_budget(void){
     BudgetStore candidate=app.budget;
     BudgetItem item={0};BudgetTotals check;
     size_t len=strlen(budget_name_text);double val;
-    if(len==0 || len>=sizeof(item.name) || strpbrk(budget_name_text,"\n\r\t")){
+    if(len==0 || !utf8_valid(budget_name_text) || len>=sizeof(item.name) || strpbrk(budget_name_text,"\n\r\t")){
         status("Informe uma descricao de ate 63 caracteres.",1);return -1;
     }
     if(parse_number(budget_amount_text,&val)<0 || val<0 || val>1e12){
@@ -427,7 +497,7 @@ static int update_budget(void){
     item.kind=app.budget_filter;
     item.category=app.budget_filter==BUDGET_INCOME?CAT_OUTROS:app.budget_category;
     item.fixed=app.budget_filter==BUDGET_INCOME?1:app.budget_fixed;
-    if(!budget_valid_item(&item)){status("Lancamento invalido.",1);return -1;}
+    if(!budget_valid_item(&item)){status("Lançamento inválido.",1);return -1;}
     if(app.budget_edit_index>=0){
         if(app.budget_edit_index>=candidate.count)return -1;
         candidate.items[app.budget_edit_index]=item;
@@ -437,7 +507,7 @@ static int update_budget(void){
     }
     if(budget_totals(&candidate,&check)<0){status("Orcamento invalido.",1);return -1;}
     app.budget=candidate;budget_modified();app.modal=MODAL_NONE;app.budget_scroll=0;
-    status("Lancamento atualizado.",0);return 0;
+    status("Lançamento atualizado.",0);return 0;
 }
 static void launch_investment_editor(void){
     number(app.budget.monthly_investment,investment_amount_text,sizeof(investment_amount_text));
@@ -447,7 +517,7 @@ static int update_investment(void){
     BudgetStore candidate=app.budget;
     BudgetTotals check;double amount;
     if(parse_number(investment_amount_text,&amount)<0 || amount<0 || amount>1e12){
-        status("Informe um investimento mensal valido (0 a 1 trilhao).",1);return -1;
+        status("Informe um investimento mensal válido (0 a 1 trilhão).",1);return -1;
     }
     candidate.monthly_investment=round(amount*100.0)/100.0;
     if(budget_totals(&candidate,&check)<0){status("Valor invalido.",1);return -1;}
@@ -461,7 +531,7 @@ static void remove_budget(void){
     if(i<0||i>=app.budget.count)return;
     for(;i<app.budget.count-1;i++)app.budget.items[i]=app.budget.items[i+1];
     app.budget.count--;app.budget_scroll=0;budget_modified();
-    status("Lancamento removido.",0);
+    status("Lançamento removido.",0);
 }
 static void begin_focus(Field f){
     char buf[MAX_EDIT]={0};
@@ -480,17 +550,18 @@ static void begin_focus(Field f){
 }
 static int end_focus(void){
     Field f=app.focus;
+    if(app.dead_pending)reset_dead_composition();
     if(f==F_NONE)return 0;
     /* Nome vazio nunca deve bloquear a navegacao nem alterar o cenario.
      * Descarta somente a edicao incompleta, preservando todos os dados. */
     if(f==F_NAME){
         const unsigned char *p=(const unsigned char*)app.input;
         while(*p==' '||*p=='\t'||*p=='\r'||*p=='\n')p++;
-        if(!*p || strlen(app.input)>=sizeof(current()->name) ||
+        if(!*p || !utf8_valid(app.input) || strlen(app.input)>=sizeof(current()->name) ||
            strpbrk(app.input,"\r\n\t")){
             app.focus=F_NONE;app.sel_all=0;app.caret=0;
             snprintf(app.input,sizeof(app.input),"%s",current()->name);
-            status("Nome invalido descartado. Dados do cenario preservados.",1);
+            status("Nome inválido descartado. Dados do cenário preservados.",1);
             return 1;
         }
     }
@@ -515,7 +586,7 @@ static int list_visible(void);
 static void scenario_new(int duplicate){
     Scenario s;int num=1,i,used;
     if(end_focus()<0)return;
-    if(app.store.count==INVEST_MAX_SCENARIOS){status("Limite de 32 cenarios.",1);return;}
+    if(app.store.count==INVEST_MAX_SCENARIOS){status("Limite de 32 cenários.",1);return;}
     s=duplicate?*current():(Scenario){0};
     if(!duplicate)scenario_default(&s);
     do {
@@ -532,7 +603,7 @@ static void scenario_new(int duplicate){
 }
 static void scenario_remove(void){
     int i,n=app.store.selected;
-    if(app.store.count<=1){status("Pelo menos um cenario precisa permanecer.",1);return;}
+    if(app.store.count<=1){status("Pelo menos um cenário precisa permanecer.",1);return;}
     for(i=n;i<app.store.count-1;i++)app.store.items[i]=app.store.items[i+1];
     app.store.count--;
     if(app.store.selected>=app.store.count)app.store.selected=app.store.count-1;
@@ -555,7 +626,7 @@ static void draw_header(void){
     Rect savebtn={app.w-159,18,132,38};
     fill((Rect){0,0,app.w,74},SIDE_BG);
     txt(22,46,"invest",WHITE,app.f_title);
-    txt(106,42,"v0.3.6",SIDE_TEXT,app.f_small);
+    txt(106,42,"v0.3.9",SIDE_TEXT,app.f_small);
     header_tab((Rect){251,17,114,39},"SIMULADOR",app.view==SIMULATE,A_SCREEN_SIM);
     header_tab((Rect){374,17,96,39},"EVENTOS",app.view==EVENTS,A_SCREEN_EVENTS);
     header_tab((Rect){479,17,112,39},"COMPARAR",app.view==COMPARE,A_SCREEN_COMPARE);
@@ -569,7 +640,10 @@ static void draw_side(void){
         budget_totals(&app.budget,&t);
         fill((Rect){0,74,SIDE,app.h-74},SIDE_BG);
         line(SIDE-1,74,SIDE-1,app.h,SIDE_ACTIVE);
-        txt(23,116,"MEU ORCAMENTO",SIDE_TEXT,app.f_bold);
+        txt(23,116,"MEU ORÇAMENTO",SIDE_TEXT,app.f_bold);
+        {char when[70];snprintf(when,sizeof(when),"%02d/%04d  |  %s",app.budget_month,app.budget_year,
+         app.budget_mode?"Realizado":"Planejado");
+         txt(23,148,when,SIDE_TEXT,app.f_small);}
         line(22,130,SIDE-22,130,SIDE_ACTIVE);
         txt(23,177,"Receitas mensais",SIDE_TEXT,app.f_small);
         money(t.income,text,sizeof(text));txt(23,207,text,WHITE,app.f_bold);
@@ -581,16 +655,16 @@ static void draw_side(void){
         txt(23,414,"SALDO DISPONIVEL",SIDE_TEXT,app.f_small);
         money(t.balance,text,sizeof(text));
         txt(23,444,text,t.balance>=0?WHITE:RED,app.f_bold);
-        txt(23,512,"Orcamento mensal",SIDE_TEXT,app.f_small);
-        txt(23,533,"sem conexao bancaria.",SIDE_TEXT,app.f_small);
-        txt(23,567,"Reserva sem vinculacao",SIDE_TEXT,app.f_small);
+        txt(23,512,"Orçamento mensal",SIDE_TEXT,app.f_small);
+        txt(23,533,"sem conexão bancária.",SIDE_TEXT,app.f_small);
+        txt(23,567,"Reserva sem vinculação",SIDE_TEXT,app.f_small);
         txt(23,588,"a ativos do simulador.",SIDE_TEXT,app.f_small);
         txt(22,app.h-18,"Dados locais  |  Linux",SIDE_TEXT,app.f_small);
         return;
     }
     fill((Rect){0,74,SIDE,app.h-74},SIDE_BG);
     line(SIDE-1,74,SIDE-1,app.h,SIDE_ACTIVE);
-    txt(23,116,"CENARIOS",SIDE_TEXT,app.f_bold);
+    txt(23,116,"CENÁRIOS",SIDE_TEXT,app.f_bold);
     line(22,128,SIDE-22,128,SIDE_ACTIVE);
     visible=list_visible();clamp_list();
     for(i=0;i<visible&&i+app.sidebar_scroll<app.store.count;i++){
@@ -602,7 +676,7 @@ static void draw_side(void){
         }
         cut_text(title,sizeof(title),s->name,r.w-28,app.f_bold);
         txt(r.x+13,r.y+23,title,WHITE,app.f_bold);
-        snprintf(sub,sizeof(sub),"%d meses  |  %.2f%% ao mes",s->months,s->rate_percent);
+        snprintf(sub,sizeof(sub),"%d meses  |  %.2f%% ao mês",s->months,s->rate_percent);
         txt(r.x+13,r.y+43,sub,SIDE_TEXT,app.f_small);
         add_hit(r,A_CHOOSE,n);
     }
@@ -611,7 +685,7 @@ static void draw_side(void){
         button((Rect){23,y-41,87,29},"Anterior",0,A_LIST_PREV,0);
         button((Rect){132,y-41,87,29},"Proximo",0,A_LIST_NEXT,0);
     }
-    button((Rect){18,y,SIDE-36,39},"+ Novo cenario",1,A_NEW,0);
+    button((Rect){18,y,SIDE-36,39},"+ Novo cenário",1,A_NEW,0);
     txt(22,app.h-18,"Dados locais  |  Linux",SIDE_TEXT,app.f_small);
 }
 static void draw_footer(void){
@@ -684,11 +758,11 @@ static void draw_graph(Rect r,const Scenario *a,const Scenario *b) {
         cairo_stroke(app.cr);
     }
     cairo_restore(app.cr);
-    txt(r.x+25,r.y+27,b?"Evolucao dos dois cenarios":"Evolucao do patrimonio",INK,app.f_bold);
+    txt(r.x+25,r.y+27,b?"Evolução dos dois cenários":"Evolução do patrimônio",INK,app.f_bold);
     rounded((Rect){r.x+r.w-271,r.y+15,11,11},5,BLUE);
-    txt(r.x+r.w-252,r.y+25,b?"Cenario A":"Patrimonio",MUTED,app.f_small);
+    txt(r.x+r.w-252,r.y+25,b?"Cenário A":"Patrimonio",MUTED,app.f_small);
     rounded((Rect){r.x+r.w-131,r.y+15,11,11},5,PURPLE);
-    txt(r.x+r.w-112,r.y+25,b?"Cenario B":"Investido",MUTED,app.f_small);
+    txt(r.x+r.w-112,r.y+25,b?"Cenário B":"Investido",MUTED,app.f_small);
 }
 static void draw_sim(void){
     int x=SIDE+30,w=app.w-SIDE-60,half=(w-51)/2;
@@ -697,10 +771,10 @@ static void draw_sim(void){
     if(project_scenario(s,&p,NULL,NULL)<0){
         memset(&p,0,sizeof(p));status("Projecao fora da escala numerica.",1);
     }
-    display_field((Rect){x,110,w-268,43},"Nome do cenario",s->name,F_NAME,NULL);
+    display_field((Rect){x,110,w-268,43},"Nome do cenário",s->name,F_NAME,NULL);
     button((Rect){x+w-236,112,112,39},"Duplicar",0,A_DUPLICATE,0);
     button((Rect){x+w-112,112,112,39},"Excluir",3,A_DELETE,0);
-    txt(x,176,"Preencha os campos e veja sua projecao em tempo real.",MUTED,app.f_normal);
+    txt(x,176,"Preencha os campos e veja sua projeção em tempo real.",MUTED,app.f_normal);
     r=(Rect){x,192,w,214};card(r);
     txt(x+22,218,"Dados do investimento",INK,app.f_bold);
     button((Rect){x+w-212,200,189,32},"Eventos e aportes  >",2,A_OPEN_EVENTS,0);
@@ -708,7 +782,7 @@ static void draw_sim(void){
     number(s->rate_percent,b3,sizeof(b3));snprintf(b4,sizeof(b4),"%d",s->months);
     display_field((Rect){x+24,250,half-6,41},"Valor inicial",b1,F_INITIAL,"R$");
     display_field((Rect){x+31+half,250,half-6,41},"Aporte mensal",b2,F_MONTHLY,"R$");
-    display_field((Rect){x+24,322,half-6,41},"Juros por mes",b3,F_RATE,"%");
+    display_field((Rect){x+24,322,half-6,41},"Juros por mês",b3,F_RATE,"%");
     display_field((Rect){x+31+half,322,half-6,41},"Prazo",b4,F_MONTHS,"meses");
     /* Equivalencia composta: (1 + taxa mensal/100)^12 - 1. Taxa BASE,
        mesmo quando o cenario inclui mudancas futuras na aba Eventos. */
@@ -748,20 +822,20 @@ static void draw_compare(void){
     Projection pa,pb;char v[96],text[120];int split=(w-14)/2;
     if(project_scenario(a,&pa,NULL,NULL)<0)memset(&pa,0,sizeof(pa));
     if(project_scenario(b,&pb,NULL,NULL)<0)memset(&pb,0,sizeof(pb));
-    txt(x,top,"Comparar cenarios",INK,app.f_title);
+    txt(x,top,"Comparar cenários",INK,app.f_title);
     txt(x,top+25,app.store.count>1?"Veja os resultados e as curvas lado a lado.":
-        "Crie mais um cenario para comparar resultados diferentes.",MUTED,app.f_normal);
+        "Crie mais um cenário para comparar resultados diferentes.",MUTED,app.f_normal);
     button((Rect){x,181,split,42},a->name,2,A_CMP_A,0);
     button((Rect){x+split+14,181,split,42},b->name,0,A_CMP_B,0);
     for(int i=0;i<2;i++){
         const Projection*p=i?&pb:&pa;const Scenario*s=i?b:a;
         int colx=x+i*(split+14);
         r=(Rect){colx,240,split,153};card(r);
-        txt(colx+20,269,i?"CENARIO B":"CENARIO A",MUTED,app.f_small);
+        txt(colx+20,269,i?"CENÁRIO B":"CENÁRIO A",MUTED,app.f_small);
         money(p->final_balance,v,sizeof(v));txt(colx+20,309,v,INK,app.f_number);
         money(p->earnings,v,sizeof(v));
         snprintf(text,sizeof(text),"Juros: %s",v);txt(colx+20,343,text,p->earnings>=0?GREEN:RED,app.f_bold);
-        snprintf(text,sizeof(text),"%d meses | %.2f%% ao mes",s->months,s->rate_percent);
+        snprintf(text,sizeof(text),"%d meses | %.2f%% ao mês",s->months,s->rate_percent);
         txt(colx+20,370,text,MUTED,app.f_small);
     }
     r=(Rect){x,409,w,87};card(r);
@@ -779,12 +853,16 @@ static void draw_compare(void){
     draw_graph(r,a,b);
     txt(x,app.h-51,"Comparacao nominal, sem impostos ou inflacao.",MUTED,app.f_small);
 }
-/* Financas: receitas e despesas mensais, sem aparencia de planilha. */
+/* Monthly personal finance: each calendar month has independent planned/actual. */
+static const char *const month_labels[12]={
+    "Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+    "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"
+};
 static Rect budget_list_box(void){
-    return (Rect){SIDE+30,410,app.w-SIDE-60,app.h-465};
+    return (Rect){SIDE+30,478,app.w-SIDE-60,app.h-531};
 }
 static int budget_visible(void){
-    Rect r=budget_list_box();return imax(1,(r.h-134)/57);
+    Rect r=budget_list_box();return imax(1,(r.h-123)/57);
 }
 static void budget_amount_text_draw(int x,int y,int width,double value,Color col){
     char buf[80],clipped[80];
@@ -792,64 +870,154 @@ static void budget_amount_text_draw(int x,int y,int width,double value,Color col
     if(tw(buf,app.f_number)<=width)txt(x,y,buf,col,app.f_number);
     else{cut_text(clipped,sizeof(clipped),buf,width,app.f_bold);txt(x,y,clipped,col,app.f_bold);}
 }
+static double monthly_metric(const BudgetTotals *t,int metric){
+    switch(metric){
+    case 1:return t->income;
+    case 2:return t->expenses;
+    case 3:return t->monthly_investment;
+    default:return t->balance;
+    }
+}
+static void draw_year_chart(Rect r){
+    static const char *const labels[]={"Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"};
+    static const char *const metrics[]={"Saldo disponível","Receitas","Despesas","Investimentos"};
+    double values[2][12]={{0}},mn=0,mx=0;int present[12]={0};int have[2][12]={{0}};
+    int x=r.x+25,y=r.y+83,w=r.w-50,h=r.h-145;
+    char buf[100],title[140],err[180];
+    card(r);
+    snprintf(title,sizeof(title),"Evolução de %s em %d",metrics[app.chart_metric],app.budget_year);
+    txt(r.x+19,r.y+32,title,INK,app.f_bold);
+    button((Rect){r.x+r.w-160,r.y+13,139,33},"Trocar indicador",0,A_MONTH_CHART,0);
+    rounded((Rect){r.x+21,r.y+47,12,12},3,BLUE);
+    txt(r.x+40,r.y+58,"Planejado",MUTED,app.f_small);
+    rounded((Rect){r.x+142,r.y+47,12,12},3,PURPLE);
+    txt(r.x+161,r.y+58,"Realizado",MUTED,app.f_small);
+    for(int m=1;m<=12;m++){
+        MonthlyBudget month={0};int rc;
+        if(m==app.budget_month){month=app.monthly;rc=0;}
+        else rc=monthly_load(app.budget_year,m,&month,err,sizeof(err));
+        if(rc<0){present[m-1]=-1;continue;}
+        if(rc==1)continue;
+        present[m-1]=1;
+        BudgetTotals t;
+        if(budget_totals(&month.planned,&t)==0)values[0][m-1]=monthly_metric(&t,app.chart_metric);
+        if(budget_totals(&month.actual,&t)==0)values[1][m-1]=monthly_metric(&t,app.chart_metric);
+        have[0][m-1]=month.planned.count>0||month.planned.monthly_investment>0.0;
+        have[1][m-1]=month.actual.count>0||month.actual.monthly_investment>0.0;
+        for(int mode=0;mode<2;mode++)if(have[mode][m-1]){
+            mn=fmin(mn,values[mode][m-1]);mx=fmax(mx,values[mode][m-1]);
+        }
+    }
+    if(h<60){txt(x,r.y+104,"Aumente a janela para ver o gráfico anual.",MUTED,app.f_small);return;}
+    if(mx-mn<1.0){mx+=1;mn-=1;}
+    double range=mx-mn;
+    for(int tick=0;tick<=3;tick++){
+        int yy=y+h-tick*h/3;double v=mn+tick*range/3;
+        line(x,yy,x+w,yy,GRID);
+        money(v,buf,sizeof(buf));
+        /* Labels compact to keep the graph readable on narrow windows. */
+        if(tick==0||tick==3){
+            snprintf(buf,sizeof(buf),"%.0f",v);
+            txt(x+3,yy-5,buf,MUTED,app.f_small);
+        }
+    }
+    {double base=(0-mn)/range;int zero=y+h-(int)round(h*base);
+     if(zero>=y&&zero<=y+h)line(x,zero,x+w,zero,BORDER);}
+    for(int m=0;m<12;m++){
+        int center=x+(m*2+1)*w/24,bw=imax(5,imin(13,w/42));
+        if(present[m]==1){
+            for(int mode=0;mode<2;mode++){
+                if(!have[mode][m])continue;
+                double v=values[mode][m];
+                int yy=y+h-(int)round((v-mn)/range*h);
+                int zy=y+h-(int)round((0-mn)/range*h);
+                int top=imin(yy,zy),hh=abs(yy-zy);
+                rounded((Rect){center+(mode?2:-bw-2),top,bw,imax(2,hh)},2,mode?PURPLE:BLUE);
+            }
+        }else if(present[m]<0){
+            txt(center-4,y+h/2,"!",RED,app.f_bold);
+        }
+        txt(center-11,y+h+21,labels[m],m+1==app.budget_month?BLUE:MUTED,app.f_small);
+    }
+    txt(r.x+20,r.y+r.h-14,"Meses sem registros ficam vazios. ! indica arquivo inválido.",MUTED,app.f_small);
+}
 static void draw_budget(void){
     int x=SIDE+30,w=app.w-SIDE-60,i,j,cell=(w-24)/3;
-    BudgetTotals t;Rect r;char buf[128],amount[80];double used;
+    BudgetTotals t,planned,actual;Rect r;char buf[120],amount[80],monthtext[120];double used;
     int count,n;
-    if(budget_totals(&app.budget,&t)<0){status("Orcamento invalido.",1);return;}
-    txt(x,119,"Organização financeira",INK,app.f_title);
-    txt(x,147,"Acompanhe receitas, despesas e o valor mensal reservado para investir.",MUTED,app.f_small);
+    if(budget_totals(&app.budget,&t)<0||
+       budget_totals(&app.monthly.planned,&planned)<0||
+       budget_totals(&app.monthly.actual,&actual)<0){status("Orçamento inválido.",1);return;}
+    txt(x,113,"Organização financeira",INK,app.f_title);
+    button((Rect){x,132,37,34},"<",0,A_MONTH_PREV,0);
+    snprintf(monthtext,sizeof(monthtext),"%s de %d",month_labels[app.budget_month-1],app.budget_year);
+    txt(x+45,155,monthtext,INK,app.f_bold);
+    button((Rect){x+210,132,37,34},">",0,A_MONTH_NEXT,0);
+    button((Rect){x+w-206,132,98,34},"Planejado",app.budget_mode==0?1:0,A_MONTH_PLAN,0);
+    button((Rect){x+w-102,132,102,34},"Realizado",app.budget_mode==1?1:0,A_MONTH_ACTUAL,0);
+    txt(x,183,app.budget_mode?"Registre o que realmente entrou, saiu e foi investido.":
+          "Planeje receitas, gastos e quanto pretende investir neste mês.",MUTED,app.f_small);
     for(i=0;i<3;i++){
         int col=x+i*(cell+12);double v=i==0?t.income:i==1?t.expenses:t.balance;
-        r=(Rect){col,168,cell,113};card(r);
-        txt(col+17,194,i==0?"Receitas do mes":i==1?"Despesas do mes":"Saldo disponivel",MUTED,app.f_small);
-        budget_amount_text_draw(col+17,234,cell-34,v,i==2?(v>=0?GREEN:RED):INK);
-        txt(col+17,260,i==0?"Total que entra":i==1?"Gastos previstos":"Apos gastos e investimento",MUTED,app.f_small);
+        r=(Rect){col,199,cell,100};card(r);
+        txt(col+17,224,i==0?"Receitas":i==1?"Despesas":"Saldo disponível",MUTED,app.f_small);
+        budget_amount_text_draw(col+17,265,cell-34,v,i==2?(v>=0?GREEN:RED):INK);
+        txt(col+17,285,i==0?"Total recebido/esperado":i==1?"Total de gastos":"Após gastos e investimentos",MUTED,app.f_small);
     }
-    r=(Rect){x,297,w,99};card(r);
-    txt(x+19,323,"Reserva mensal para investir",INK,app.f_bold);
+    r=(Rect){x,309,w,94};card(r);
+    txt(x+18,335,app.budget_mode?"Investimentos realizados":"Investimentos planejados",INK,app.f_bold);
     money(t.monthly_investment,amount,sizeof(amount));
-    text_right(x+w-180,323,amount,BLUE,app.f_bold);
-    button((Rect){x+w-166,303,146,37},"Definir valor",1,A_INVESTMENT_EDIT,0);
+    text_right(x+w-181,335,amount,BLUE,app.f_bold);
+    button((Rect){x+w-162,315,143,34},"Definir valor",1,A_INVESTMENT_EDIT,0);
     used=t.income>0?(t.expenses+t.monthly_investment)/t.income:0;
-    if(t.income>0)snprintf(buf,sizeof(buf),"%.0f%% da renda comprometida (gastos + investimento)",used*100.0);
-    else snprintf(buf,sizeof(buf),"Cadastre receitas para calcular o percentual comprometido");
-    txt(x+19,350,buf,MUTED,app.f_small);
-    rounded((Rect){x+19,357,w-38,9},4,LIGHT);
+    if(t.income>0)snprintf(buf,sizeof(buf),"%.0f%% da renda para gastos e investimentos",used*100.0);
+    else snprintf(buf,sizeof(buf),"Cadastre receitas para calcular o percentual.");
+    txt(x+19,361,buf,MUTED,app.f_small);
+    rounded((Rect){x+19,371,w-38,8},4,LIGHT);
     if(t.income>0){
         double ex=fmin(1.0,t.expenses/t.income),inv=fmin(1.0-ex,t.monthly_investment/t.income);
         int ew=(int)round((w-38)*ex),iw=(int)round((w-38)*inv);
-        if(ew>0)fill((Rect){x+19,357,ew,9},GREEN);
-        if(iw>0)fill((Rect){x+19+ew,357,iw,9},PURPLE);
+        if(ew>0)rounded((Rect){x+19,371,ew,8},3,GREEN);
+        if(iw>0)rounded((Rect){x+19+ew,371,iw,8},3,PURPLE);
     }
-    money(t.fixed_expenses,buf,sizeof(buf));
-    {char text[160];snprintf(text,sizeof(text),"Fixas: %s",buf);txt(x+19,382,text,MUTED,app.f_small);}
-    money(t.variable_expenses,buf,sizeof(buf));
-    {char text[160];snprintf(text,sizeof(text),"Variáveis: %s",buf);text_right(x+w-21,382,text,MUTED,app.f_small);}
-    r=budget_list_box();card(r);
-    button((Rect){x+17,r.y+17,110,37},"Receitas",app.budget_filter==BUDGET_INCOME?1:0,A_BUDGET_INCOME,0);
-    button((Rect){x+136,r.y+17,115,37},"Despesas",app.budget_filter==BUDGET_EXPENSE?1:0,A_BUDGET_EXPENSE,0);
-    button((Rect){x+w-165,r.y+17,145,37},"+ Adicionar",1,A_BUDGET_NEW,0);
-    line(x+17,r.y+63,x+w-17,r.y+63,BORDER);
+    money(planned.balance,buf,sizeof(buf));
+    {char temp[165];snprintf(temp,sizeof(temp),"Saldo previsto: %s",buf);
+     txt(x+6,428,temp,MUTED,app.f_small);}
+    if(app.monthly.actual.count==0&&app.monthly.actual.monthly_investment==0.0)
+        txt(x+6,448,"Saldo realizado: sem lançamentos",MUTED,app.f_small);
+    else{
+        money(actual.balance,buf,sizeof(buf));
+        char temp[165];snprintf(temp,sizeof(temp),"Saldo realizado: %s",buf);
+        txt(x+6,448,temp,MUTED,app.f_small);
+    }
+    button((Rect){x+w-307,414,146,37},"Copiar anterior",0,A_MONTH_COPY,0);
+    button((Rect){x+w-154,414,154,37},app.year_view?"Lançamentos":"Visão anual",1,A_MONTH_YEAR,0);
+    r=budget_list_box();
+    if(app.year_view){draw_year_chart(r);return;}
+    card(r);
+    button((Rect){x+17,r.y+14,110,34},"Receitas",app.budget_filter==BUDGET_INCOME?1:0,A_BUDGET_INCOME,0);
+    button((Rect){x+136,r.y+14,115,34},"Despesas",app.budget_filter==BUDGET_EXPENSE?1:0,A_BUDGET_EXPENSE,0);
+    button((Rect){x+w-166,r.y+14,146,34},"+ Adicionar",1,A_BUDGET_NEW,0);
+    line(x+17,r.y+56,x+w-17,r.y+56,BORDER);
     count=budget_count_kind(app.budget_filter);
     n=budget_visible();
     app.budget_scroll=imin(app.budget_scroll,imax(0,count-n));
     if(!count){
-        txt(x+25,r.y+116,app.budget_filter==BUDGET_INCOME?
-           "Nenhuma receita cadastrada.":"Nenhuma despesa cadastrada.",INK,app.f_bold);
-        txt(x+25,r.y+143,"Clique em + Adicionar para comecar.",MUTED,app.f_small);
+        txt(x+25,r.y+91,app.budget_filter==BUDGET_INCOME?
+           "Nenhuma receita registrada neste mês.":"Nenhuma despesa registrada neste mês.",INK,app.f_bold);
+        txt(x+25,r.y+114,"Clique em + Adicionar para começar.",MUTED,app.f_small);
     }
     for(i=0;i<n && i+app.budget_scroll<count;i++){
         j=budget_index(i+app.budget_scroll);
         if(j<0)break;
         const BudgetItem *it=&app.budget.items[j];
-        Rect row={x+17,r.y+73+i*57,w-34,51};char label[100],val[80],name[90];
+        Rect row={x+17,r.y+63+i*57,w-34,51};char label[100],val[80],name[90];
         rounded(row,7,LIGHT);
         cut_text(name,sizeof(name),it->name,imax(65,row.w-408),app.f_bold);
         txt(row.x+14,row.y+21,name,INK,app.f_bold);
         if(it->kind==BUDGET_EXPENSE)
-            snprintf(label,sizeof(label),"%s | %s",budget_categories[it->category],it->fixed?"Fixa":"Variavel");
-        else snprintf(label,sizeof(label),"Receita mensal");
+            snprintf(label,sizeof(label),"%s | %s",budget_categories[it->category],it->fixed?"Fixa":"Variável");
+        else snprintf(label,sizeof(label),"Receita");
         txt(row.x+14,row.y+40,label,MUTED,app.f_small);
         money(it->amount,val,sizeof(val));
         text_right(row.x+row.w-199,row.y+31,val,it->kind==BUDGET_INCOME?GREEN:INK,app.f_bold);
@@ -857,12 +1025,12 @@ static void draw_budget(void){
         button((Rect){row.x+row.w-98,row.y+9,88,33},"Excluir",3,A_BUDGET_DELETE,j);
     }
     if(count>n){
-        button((Rect){x+19,r.y+r.h-47,94,32},"Anterior",0,A_BUDGET_PREV,0);
-        button((Rect){x+121,r.y+r.h-47,94,32},"Proximo",0,A_BUDGET_NEXT,0);
+        button((Rect){x+19,r.y+r.h-41,94,29},"Anterior",0,A_BUDGET_PREV,0);
+        button((Rect){x+121,r.y+r.h-41,94,29},"Próximo",0,A_BUDGET_NEXT,0);
         snprintf(buf,sizeof(buf),"%d-%d de %d",app.budget_scroll+1,imin(count,app.budget_scroll+n),count);
-        text_right(x+w-24,r.y+r.h-25,buf,MUTED,app.f_small);
+        text_right(x+w-24,r.y+r.h-22,buf,MUTED,app.f_small);
     }else{
-        txt(x+20,r.y+r.h-20,"Valores recorrentes de um mes padrao; nao e extrato bancario.",MUTED,app.f_small);
+        txt(x+20,r.y+r.h-18,"Valores deste mês; planejado e realizado são independentes.",MUTED,app.f_small);
     }
 }
 static Rect modal_box(void){
@@ -887,7 +1055,7 @@ static void draw_events(void){
     const char *title=app.event_type==INVEST_RATES?"Mudancas de juros":
                       app.event_type==INVEST_MONTHLY?"Mudancas de aporte mensal":
                       "Aportes extraordinarios";
-    txt(x,119,"Eventos do cenario",INK,app.f_title);
+    txt(x,119,"Eventos do cenário",INK,app.f_title);
     txt(x,146,"Programe taxas e aportes temporarios ou permanentes.",MUTED,app.f_normal);
     card(r);
     button((Rect){x+20,r.y+21,165,40},"Juros",app.event_type==INVEST_RATES?1:0,A_EVENT_RATE_TAB,0);
@@ -897,15 +1065,15 @@ static void draw_events(void){
     txt(x+25,r.y+115,title,INK,app.f_bold);
     button((Rect){x+w-199,r.y+92,175,41},"+ Adicionar",1,A_EVENT_NEW,0);
     txt(x+25,r.y+147,app.event_type==INVEST_RATES?
-        "Defina uma taxa por alguns meses ou ate o fim.":
+        "Defina uma taxa por alguns meses ou até o fim.":
         app.event_type==INVEST_MONTHLY?
-        "Defina um novo aporte mensal por alguns meses ou ate o fim.":
-        "Acrescente um investimento uma unica vez.",MUTED,app.f_small);
+        "Defina um novo aporte mensal por alguns meses ou até o fim.":
+        "Acrescente um investimento uma única vez.",MUTED,app.f_small);
     line(x+23,r.y+161,x+w-23,r.y+161,BORDER);
     n=imax(1,(r.h-266)/65);
     if(app.event_scroll>imax(0,count-n))app.event_scroll=imax(0,count-n);
     if(count==0){
-        txt(x+29,r.y+218,"Nenhuma alteracao cadastrada.",INK,app.f_bold);
+        txt(x+29,r.y+218,"Nenhuma alteração cadastrada.",INK,app.f_bold);
         txt(x+29,r.y+246,app.event_type==INVEST_RATES?
             "A taxa base vale durante todo o periodo.":
             app.event_type==INVEST_MONTHLY?
@@ -916,11 +1084,11 @@ static void draw_events(void){
         int idx=i+app.event_scroll;Rect item={x+23,r.y+172+i*65,w-46,58};
         rounded(item,7,LIGHT);
         if(app.event_type==INVEST_EXTRAS)
-            snprintf(heading,sizeof(heading),"No mes %d",arr[idx].month);
+            snprintf(heading,sizeof(heading),"No mês %d",arr[idx].month);
         else if(arr[idx].end_month==0)
-            snprintf(heading,sizeof(heading),"A partir do mes %d",arr[idx].month);
+            snprintf(heading,sizeof(heading),"A partir do mês %d",arr[idx].month);
         else
-            snprintf(heading,sizeof(heading),"Do mes %d ao %d",arr[idx].month,arr[idx].end_month);
+            snprintf(heading,sizeof(heading),"Do mês %d ao %d",arr[idx].month,arr[idx].end_month);
         txt(item.x+17,item.y+23,heading,INK,app.f_bold);
         if(app.event_type==INVEST_RATES){
             number(arr[idx].value,val,sizeof(val));
@@ -947,15 +1115,15 @@ static void draw_events(void){
 static void draw_event_editor(void){
     Rect r=modal_box();Rect d={r.x+63,r.y+52,r.w-126,492};char text[160];
     card(r);card(d);
-    txt(d.x+25,d.y+38,app.event_edit_index<0?"Nova alteracao":"Editar alteracao",INK,app.f_title);
+    txt(d.x+25,d.y+38,app.event_edit_index<0?"Nova alteração":"Editar alteração",INK,app.f_title);
     txt(d.x+25,d.y+68,app.event_type==INVEST_RATES?
        "Escolha quando os novos juros comecam.":
        app.event_type==INVEST_MONTHLY?
        "Escolha quando o novo aporte mensal comeca.":
-       "Defina um aporte extra para um unico mes.",MUTED,app.f_normal);
+       "Defina um aporte extra para um único mês.",MUTED,app.f_normal);
     snprintf(text,sizeof(text),"%s",event_month_text);
     display_field((Rect){d.x+25,d.y+114,d.w-50,43},
-                  app.event_type==INVEST_EXTRAS?"Mes do aporte":"Mes inicial",text,F_EVENT_MONTH,"mes");
+                  app.event_type==INVEST_EXTRAS?"Mês do aporte":"Mês inicial",text,F_EVENT_MONTH,"mes");
     snprintf(text,sizeof(text),"%s",event_value_text);
     display_field((Rect){d.x+25,d.y+198,d.w-50,43},
                   app.event_type==INVEST_RATES?"Nova taxa mensal":
@@ -967,12 +1135,12 @@ static void draw_event_editor(void){
         button((Rect){d.x+225,d.y+283,207,39},"Por alguns meses",app.event_limited?1:0,A_EVENT_TEMP,0);
         if(app.event_limited){
             snprintf(text,sizeof(text),"%s",event_duration_text);
-            display_field((Rect){d.x+25,d.y+362,225,43},"Duracao",text,F_EVENT_DURATION,"meses");
+            display_field((Rect){d.x+25,d.y+362,225,43},"Duração",text,F_EVENT_DURATION,"meses");
             txt(d.x+272,d.y+389,"Depois, retoma a regra",MUTED,app.f_small);
             txt(d.x+272,d.y+405,"anterior ainda vigente.",MUTED,app.f_small);
         }else{
             txt(d.x+25,d.y+365,"A nova regra vale ate o fim, exceto quando",MUTED,app.f_small);
-            txt(d.x+25,d.y+387,"outra alteracao estiver ativa.",MUTED,app.f_small);
+            txt(d.x+25,d.y+387,"outra alteração estiver ativa.",MUTED,app.f_small);
         }
     }else{
         txt(d.x+25,d.y+293,"Aporte unico: nao altera o aporte mensal regular.",MUTED,app.f_small);
@@ -985,10 +1153,10 @@ static void draw_budget_editor(void){
     card(r);card(d);
     txt(d.x+25,d.y+38,app.budget_edit_index>=0?"Editar lancamento":"Novo lancamento",INK,app.f_title);
     txt(d.x+25,d.y+68,app.budget_filter==BUDGET_INCOME?
-        "Adicione uma receita que entra todos os meses.":
-        "Adicione uma despesa mensal ao seu orcamento.",MUTED,app.f_normal);
+        "Registre a receita deste mês.":
+        "Registre uma despesa deste mês.",MUTED,app.f_normal);
     display_field((Rect){d.x+25,d.y+114,d.w-50,43},"Descrição",budget_name_text,F_BUDGET_NAME,NULL);
-    display_field((Rect){d.x+25,d.y+198,d.w-50,43},"Valor mensal",budget_amount_text,F_BUDGET_AMOUNT,"R$");
+    display_field((Rect){d.x+25,d.y+198,d.w-50,43},"Valor neste mês",budget_amount_text,F_BUDGET_AMOUNT,"R$");
     if(app.budget_filter==BUDGET_EXPENSE){
         txt(d.x+25,d.y+276,"Categoria",MUTED,app.f_small);
         snprintf(label,sizeof(label),"%s  >",budget_categories[app.budget_category]);
@@ -997,8 +1165,8 @@ static void draw_budget_editor(void){
         button((Rect){d.x+25,d.y+368,180,39},"Fixa",app.budget_fixed?1:0,A_BUDGET_FIXED,0);
         button((Rect){d.x+214,d.y+368,180,39},"Variável",app.budget_fixed?0:1,A_BUDGET_VARIABLE,0);
     }else{
-        txt(d.x+25,d.y+299,"Receitas sao consideradas recorrentes todos os meses.",MUTED,app.f_small);
-        txt(d.x+25,d.y+330,"O orcamento e separado dos seus cenarios.",MUTED,app.f_small);
+        txt(d.x+25,d.y+299,"Cada mês tem seus próprios lançamentos.",MUTED,app.f_small);
+        txt(d.x+25,d.y+330,"Planejado e realizado são independentes.",MUTED,app.f_small);
     }
     button((Rect){d.x+25,d.y+432,125,42},"Cancelar",0,A_BUDGET_CANCEL,0);
     button((Rect){d.x+d.w-165,d.y+432,140,42},"Salvar",1,A_BUDGET_SAVE,0);
@@ -1007,9 +1175,9 @@ static void draw_investment_editor(void){
     Rect outer=modal_box();Rect d={outer.x+73,outer.y+105,outer.w-146,348};
     card(outer);card(d);
     txt(d.x+25,d.y+45,"Investimento mensal",INK,app.f_title);
-    txt(d.x+25,d.y+84,"Quanto da sua renda deseja reservar para investir?",MUTED,app.f_normal);
-    display_field((Rect){d.x+25,d.y+144,d.w-50,46},"Valor planejado por mes",investment_amount_text,F_INVESTMENT_AMOUNT,"R$");
-    txt(d.x+25,d.y+221,"O valor sera descontado do saldo disponivel.",MUTED,app.f_small);
+    txt(d.x+25,d.y+84,"Informe quanto pretende investir ou já investiu no mês.",MUTED,app.f_normal);
+    display_field((Rect){d.x+25,d.y+144,d.w-50,46},"Valor deste mês",investment_amount_text,F_INVESTMENT_AMOUNT,"R$");
+    txt(d.x+25,d.y+221,"O valor será descontado do saldo disponível.",MUTED,app.f_small);
     txt(d.x+25,d.y+246,"Nao altera os aportes de suas simulacoes.",MUTED,app.f_small);
     button((Rect){d.x+25,d.y+288,128,42},"Cancelar",0,A_INVESTMENT_CANCEL,0);
     button((Rect){d.x+d.w-166,d.y+288,141,42},"Confirmar",1,A_INVESTMENT_SAVE,0);
@@ -1019,8 +1187,8 @@ static void draw_confirm(void){
     card(outer);card(r);
     txt(r.x+24,r.y+51,"Confirmar exclusao",INK,app.f_title);
     txt(r.x+24,r.y+105,app.confirm==CONFIRM_EVENT?
-      "Remover este evento do cenario?":app.confirm==CONFIRM_BUDGET?
-      "Excluir este lancamento do orcamento?":"Excluir este cenario e seus eventos?",INK,app.f_normal);
+      "Remover este evento do cenário?":app.confirm==CONFIRM_BUDGET?
+      "Excluir este lançamento do orçamento?":"Excluir este cenário e seus eventos?",INK,app.f_normal);
     txt(r.x+24,r.y+134,"Esta acao nao pode ser desfeita.",MUTED,app.f_small);
     button((Rect){r.x+24,r.y+205,138,42},"Cancelar",0,A_CONFIRM_CANCEL,0);
     button((Rect){r.x+r.w-161,r.y+205,137,42},"Excluir",3,A_CONFIRM_OK,0);
@@ -1065,9 +1233,16 @@ static void execute(Action a,int arg){
     case A_SCREEN_EVENTS:app.view=EVENTS;app.event_scroll=0;break;
     case A_SCREEN_COMPARE:app.view=COMPARE;break;
     case A_SCREEN_FINANCES:app.view=FINANCES;break;
+    case A_MONTH_PREV:month_shift(-1);break;
+    case A_MONTH_NEXT:month_shift(1);break;
+    case A_MONTH_PLAN:month_mode_set(0);break;
+    case A_MONTH_ACTUAL:month_mode_set(1);break;
+    case A_MONTH_COPY:month_copy_previous();break;
+    case A_MONTH_YEAR:app.year_view=!app.year_view;break;
+    case A_MONTH_CHART:app.chart_metric=(app.chart_metric+1)%4;break;
     case A_NEW:scenario_new(0);break;
     case A_DUPLICATE:scenario_new(1);break;
-    case A_DELETE:if(app.store.count>1){app.confirm=CONFIRM_SCENARIO;app.modal=MODAL_CONFIRM;}else status("Mantenha pelo menos um cenario.",1);break;
+    case A_DELETE:if(app.store.count>1){app.confirm=CONFIRM_SCENARIO;app.modal=MODAL_CONFIRM;}else status("Mantenha pelo menos um cenário.",1);break;
     case A_CHOOSE:scenario_select(arg);break;
     case A_SAVE:(void)save();break;
     case A_OPEN_EVENTS:app.view=EVENTS;app.event_scroll=0;status("",0);break;
@@ -1132,12 +1307,77 @@ static void mouse_press(int x,int y,unsigned button){
     }
     (void)end_focus();
 }
+/* O XIM nem sempre esta presente (comum em sessoes Linux minimalistas).
+ * Usa os keysyms dead_* para ativar um segundo caminho de composicao. */
+static char key_accent(KeySym sym){
+    switch(sym){
+    case XK_dead_tilde: return '~';
+    case XK_dead_acute: return '\'';
+    case XK_dead_grave: return '`';
+    case XK_dead_circumflex: return '^';
+    case XK_dead_diaeresis: return '"';
+    case XK_dead_cedilla: return ',';
+    case XK_dead_abovering: return 'o';
+    default:return 0;
+    }
+}
+static int is_dead_key(KeySym sym){return key_accent(sym)!=0;}
+static int focus_is_text(void){
+    return app.focus==F_NAME || app.focus==F_BUDGET_NAME;
+}
+static void reset_dead_composition(void){
+    if(app.ic){char *unused=Xutf8ResetIC(app.ic);if(unused)XFree(unused);}
+    app.dead_pending=0;
+}
+/* Recebe texto UTF-8 completo do XIM. Sem XIM, converte o texto do locale
+ * com mbrtowc/wcrtomb; como ultimo recurso, aceita Latin-1 valido. */
+static int lookup_text(XKeyEvent *ev,KeySym *sym,char *out,size_t size){
+    char raw[128];int len=0;
+    *sym=NoSymbol;out[0]=0;
+    if(app.ic){
+        Status st;
+        len=Xutf8LookupString(app.ic,ev,raw,(int)sizeof(raw)-1,sym,&st);
+        if(st==XBufferOverflow||st==XLookupNone||st==XLookupKeySym)return 0;
+    }else{
+        len=XLookupString(ev,raw,(int)sizeof(raw)-1,sym,NULL);
+    }
+    if(len<=0||len>=(int)sizeof(raw))return 0;
+    raw[len]=0;
+    if(utf8_valid(raw)){
+        if(strlen(raw)>=size)return 0;
+        memcpy(out,raw,(size_t)len+1);return len;
+    }
+    /* Fallback para XLookupString em teclados que produzem Latin-1. */
+    {
+        size_t j=0;
+        for(int i=0;i<len;i++){
+            unsigned char c=(unsigned char)raw[i];
+            size_t need=c<0x80?1:2;
+            if(j+need>=size)return 0;
+            if(need==1)out[j++]=(char)c;
+            else{out[j++]=(char)(0xC0|(c>>6));out[j++]=(char)(0x80|(c&63));}
+        }
+        out[j]=0;return (int)j;
+    }
+}
 static void handle_key(XKeyEvent *ev){
-    KeySym sym;char text[32];int len=XLookupString(ev,text,sizeof(text)-1,&sym,NULL);
-    int ctrl=ev->state & ControlMask;
+    KeySym sym;char input[256];
+    int len=lookup_text(ev,&sym,input,sizeof(input));
+    int ctrl=(ev->state & ControlMask)!=0;
+    if(is_dead_key(sym)){
+        if(focus_is_text())app.dead_pending=key_accent(sym);
+        return; /* tecla morta: aguarda a proxima letra */
+    }
+    if(sym==XK_BackSpace&&app.dead_pending){
+        /* Backspace cancela um acento ainda pendente; nao apaga o nome. */
+        reset_dead_composition();return;
+    }
+    /* Deixar o XIM concluir a composicao quando ele entregar um caractere
+     * acentuado. Se ele falhar, compose_feed compoe a partir da letra ASCII. */
     if(ctrl && (sym==XK_s||sym==XK_S)){if(end_focus()==0)(void)save();return;}
     if(sym==XK_Escape){
-        if(app.focus!=F_NONE){app.focus=F_NONE;status("Edicao cancelada.",0);}
+        reset_dead_composition();
+        if(app.focus!=F_NONE){app.focus=F_NONE;status("Edição cancelada.",0);}
         else if(app.modal==MODAL_EVENT_EDIT||app.modal==MODAL_BUDGET_EDIT||app.modal==MODAL_INVESTMENT_EDIT||app.modal==MODAL_CONFIRM){app.modal=MODAL_NONE;}
         return;
     }
@@ -1164,37 +1404,38 @@ static void handle_key(XKeyEvent *ev){
     if(ctrl && (sym==XK_a||sym==XK_A)){app.sel_all=1;app.caret=(int)strlen(app.input);return;}
     if(sym==XK_Home){app.caret=0;app.sel_all=0;return;}
     if(sym==XK_End){app.caret=(int)strlen(app.input);app.sel_all=0;return;}
-    if(sym==XK_Left){app.caret=imax(0,app.caret-1);app.sel_all=0;return;}
-    if(sym==XK_Right){app.caret=imin((int)strlen(app.input),app.caret+1);app.sel_all=0;return;}
+    if(sym==XK_Left){app.caret=(int)utf8_prev_grapheme(app.input,(size_t)app.caret);app.sel_all=0;return;}
+    if(sym==XK_Right){app.caret=(int)utf8_next_grapheme(app.input,(size_t)app.caret);app.sel_all=0;return;}
     if(sym==XK_BackSpace||sym==XK_Delete){
-        int n=(int)strlen(app.input);
-        if(app.sel_all){app.input[0]=0;app.caret=0;app.sel_all=0;return;}
-        if(sym==XK_BackSpace&&app.caret>0){
-            memmove(app.input+app.caret-1,app.input+app.caret,(size_t)(n-app.caret+1));app.caret--;
-        }else if(sym==XK_Delete&&app.caret<n){
-            memmove(app.input+app.caret,app.input+app.caret+1,(size_t)(n-app.caret));
-        }return;
+        size_t pos=(size_t)app.caret;
+        (void)utf8_erase(app.input,&pos,&app.sel_all,sym==XK_BackSpace);
+        app.caret=(int)pos;
+        return;
     }
     if(ctrl||len<=0)return;
-    for(int i=0;i<len;i++){
-        unsigned char ch=(unsigned char)text[i];int n=(int)strlen(app.input);
-        if(ch>=0xA0 && (app.focus==F_NAME||app.focus==F_BUDGET_NAME)){
-            int new_len=(int)strlen(app.input);
-            unsigned char c1=(unsigned char)(0xC0|(ch>>6));
-            unsigned char c2=(unsigned char)(0x80|(ch&0x3F));
-            if(app.sel_all){app.input[0]=0;app.caret=0;app.sel_all=0;new_len=0;}
-            if(new_len<(int)sizeof(app.input)-3){
-                memmove(app.input+app.caret+2,app.input+app.caret,(size_t)(new_len-app.caret+1));
-                app.input[app.caret++]=(char)c1;app.input[app.caret++]=(char)c2;
-            }
-            continue;
+    if(focus_is_text()){
+        char composed[256];
+        int rc=compose_feed(&app.dead_pending,input,composed,sizeof(composed));
+        if(rc<=0)return;
+        snprintf(input,sizeof(input),"%s",composed);
+        len=(int)strlen(input);
+    }
+    if(!focus_is_text()){
+        /* Campos financeiros permanecem estritamente numericos. */
+        for(int i=0;i<len;i++){
+            unsigned char c=(unsigned char)input[i];
+            if(!(c>='0'&&c<='9')&&c!='.'&&c!=','&&c!='-'&&c!=' ')return;
         }
-        if(ch<32||ch>126)continue;
-        if(app.focus!=F_NAME && app.focus!=F_BUDGET_NAME && !(isdigit(ch)||ch=='.'||ch==','||ch=='-'||ch==' '))continue;
-        if(app.sel_all){app.input[0]=0;app.caret=0;app.sel_all=0;n=0;}
-        if(n>=(int)sizeof(app.input)-2)break;
-        memmove(app.input+app.caret+1,app.input+app.caret,(size_t)(n-app.caret+1));
-        app.input[app.caret++]=(char)ch;
+    }else{
+        for(int i=0;i<len;i++){
+            unsigned char c=(unsigned char)input[i];
+            if(c<32||c==127)return;
+        }
+    }
+    {
+        size_t pos=(size_t)app.caret;
+        if(utf8_insert(app.input,sizeof(app.input),&pos,&app.sel_all,input)==0)
+            app.caret=(int)pos;
     }
 }
 static AppFont font_small={12.0,0};
@@ -1218,6 +1459,8 @@ static int make_surface(void){
     return 0;
 }
 static void shutdown(void){
+    if(app.ic){XDestroyIC(app.ic);app.ic=NULL;}
+    if(app.im){XCloseIM(app.im);app.im=NULL;}
     if(app.cr)cairo_destroy(app.cr);
     if(app.surface)cairo_surface_destroy(app.surface);
     if(app.back)XFreePixmap(app.dpy,app.back);
@@ -1236,7 +1479,13 @@ static int setup(void){
     XStoreName(app.dpy,app.win,APP_TITLE);
     hints.flags=PMinSize;hints.min_width=MIN_W;hints.min_height=MIN_H;
     XSetWMNormalHints(app.dpy,app.win,&hints);
-    XSelectInput(app.dpy,app.win,ExposureMask|KeyPressMask|ButtonPressMask|StructureNotifyMask);
+    XSelectInput(app.dpy,app.win,ExposureMask|KeyPressMask|ButtonPressMask|StructureNotifyMask|FocusChangeMask);
+    app.im=XOpenIM(app.dpy,NULL,NULL,NULL);
+    if(app.im){
+        app.ic=XCreateIC(app.im,XNInputStyle,XIMPreeditNothing|XIMStatusNothing,
+                         XNClientWindow,app.win,XNFocusWindow,app.win,NULL);
+        if(!app.ic){XCloseIM(app.im);app.im=NULL;}
+    }
     app.wm_delete=XInternAtom(app.dpy,"WM_DELETE_WINDOW",False);
     XSetWMProtocols(app.dpy,app.win,&app.wm_delete,1);
     app.gc=XCreateGC(app.dpy,app.win,0,NULL);
@@ -1247,18 +1496,38 @@ static int setup(void){
     app.f_number=&font_number;
     if(make_surface()<0){fprintf(stderr,"invest: erro ao criar superficie Cairo\n");return -1;}
     XMapWindow(app.dpy,app.win);
+    if(app.ic)XSetICFocus(app.ic);
     return 0;
 }
 int main(void){
-    XEvent ev;char err[180];
+    XEvent ev;char err[180]={0};
+    (void)setlocale(LC_CTYPE,"");
+    if(XSupportsLocale())XSetLocaleModifiers("");
     memset(&app,0,sizeof(app));app.focus=F_NONE;
     if(storage_load(&app.store,err,sizeof(err))<0){
         fprintf(stderr,"invest: %s\nNenhum arquivo existente foi alterado.\n",err);
         return EXIT_FAILURE;
     }
-    if(budget_load(&app.budget,err,sizeof(err))<0){
-        fprintf(stderr,"invest: %s\nNenhum arquivo existente foi alterado.\n",err);
-        return EXIT_FAILURE;
+    {
+        BudgetStore legacy={0};int rc;time_t now=time(NULL);
+        struct tm *today=localtime(&now);
+        if(!today){fprintf(stderr,"invest: relógio do sistema indisponível\n");return EXIT_FAILURE;}
+        app.budget_year=today->tm_year+1900;
+        app.budget_month=today->tm_mon+1;
+        rc=monthly_load(app.budget_year,app.budget_month,&app.monthly,err,sizeof(err));
+        if(rc<0){fprintf(stderr,"invest: %s\nDados existentes preservados.\n",err);return EXIT_FAILURE;}
+        if(rc==1){
+            /* Legacy is an initial template, never overwritten by the new model. */
+            if(budget_load(&legacy,err,sizeof(err))<0){
+                fprintf(stderr,"invest: %s\nNenhum arquivo existente foi alterado.\n",err);
+                return EXIT_FAILURE;
+            }
+            if(legacy.count||legacy.monthly_investment>0){
+                app.monthly.planned=legacy;app.budget_dirty=1;
+                status("Orçamento antigo importado como planejamento deste mês.",0);
+            }
+        }
+        app.budget=app.monthly.planned;
     }
     if(!app.store.count){scenario_default(&app.store.items[0]);app.store.count=1;app.store.selected=0;app.dirty=1;}
     app.cmp_a=0;app.cmp_b=app.store.count>1?1:0;
@@ -1266,10 +1535,26 @@ int main(void){
     if(setup()<0){if(app.dpy)shutdown();return EXIT_FAILURE;}
     while(app.running){
         XNextEvent(app.dpy,&ev);
+        if(ev.type==KeyPress){
+            /* Teclas mortas podem ser filtradas pelo XIM antes de handle_key.
+             * Ler o nivel Shift correto para o layout brasileiro. */
+            int level=(ev.xkey.state&ShiftMask)?1:0;
+            KeySym physical=XLookupKeysym(&ev.xkey,level);
+            if(focus_is_text() && is_dead_key(physical))
+                app.dead_pending=key_accent(physical);
+            if(app.dead_pending && physical==XK_BackSpace){
+                reset_dead_composition();
+                paint();
+                continue; /* cancela o acento, nao o nome do cenario */
+            }
+        }
+        if(XFilterEvent(&ev,app.win))continue;
         switch(ev.type){
         case Expose:if(!ev.xexpose.count)paint();break;
         case ButtonPress:mouse_press(ev.xbutton.x,ev.xbutton.y,ev.xbutton.button);paint();break;
         case KeyPress:handle_key(&ev.xkey);paint();break;
+        case FocusIn:if(app.ic)XSetICFocus(app.ic);break;
+        case FocusOut:if(app.ic)XUnsetICFocus(app.ic);break;
         case ConfigureNotify:
             if(app.w!=ev.xconfigure.width||app.h!=ev.xconfigure.height){
                 app.w=ev.xconfigure.width;app.h=ev.xconfigure.height;

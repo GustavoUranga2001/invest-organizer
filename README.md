@@ -1,24 +1,24 @@
-# invest v0.3.6 — correção do editor de cenários
+# invest v0.3.9
 
-Aplicativo financeiro minimalista para Linux, escrito em **C11 + Xlib + Cairo**.
-Esta atualização corrige a edição de nomes de cenário e reforça a segurança dos
-arquivos de dados. Não altera os cálculos, as quatro abas nem os formatos TSV.
+Aplicativo nativo de simulação de investimentos e orçamento pessoal para Linux.
+Escrito em **C11 + Xlib + Cairo**, sem GTK, Qt, serviços externos ou banco de dados.
 
-## O que foi corrigido
+## Novidades: Finanças mês a mês
 
-- Ao apagar todo o nome de um cenário com Backspace e sair do campo, o programa
-  **cancela apenas a edição do nome e restaura o nome anterior**, sem afetar
-  parâmetros financeiros, eventos ou gráficos.
-- Nomes inválidos não travam o fluxo de navegação entre campos ou cenários.
-- Antes de cada atualização de `cenarios.tsv`, a última versão válida é copiada
-  atomicamente para `cenarios.tsv.bak` (desde que já exista arquivo anterior).
-- Se o arquivo anterior estiver inválido, a aplicação se recusa a sobrescrevê-lo
-  e mantém o backup existente.
+Na aba **FINANÇAS**:
 
-## Instalar e rodar no Void Linux
+1. Use as setas `<` e `>` para selecionar o mês e o ano.
+2. Alterne entre **Planejado** e **Realizado**. Cada visão tem lançamentos e investimentos independentes.
+3. Clique em **+ Adicionar** para registrar uma receita ou despesa *do mês escolhido*; edite ou exclua conforme necessário.
+4. Em **Definir valor**, informe a quantia que pretende investir ou realmente investiu naquele mês. O valor reduz o saldo disponível, mas não é uma despesa.
+5. Use **Copiar anterior** se quiser aproveitar o planejamento do mês anterior. A cópia **só funciona na visão Planejado e com o planejamento atual vazio**; não modifica o mês de origem.
+6. Selecione **Visão anual** para acompanhar a evolução de **saldo disponível, receitas, despesas e investimentos**. O botão **Trocar indicador** alterna o tipo de gráfico. Duas cores distinguem planejado e realizado.
 
-Instale os pacotes de desenvolvimento do X11 e do Cairo, além do compilador,
-make e pkg-config (`cairo-devel` e `libX11-devel` são essenciais no Void).
+**Importante:** `Realizado` não se preenche automaticamente: registre os valores efetivos para compará-los ao planejamento. Meses sem registros não são tratados como observações de zero nos gráficos. Os saldos são os valores informados, não dados bancários sincronizados.
+
+As abas **SIMULADOR**, **EVENTOS** e **COMPARAR** permanecem, incluindo taxas e aportes variáveis, eventos temporários, gráfico, taxa anual equivalente e múltiplos cenários.
+
+## Instalação no Void Linux
 
 ```sh
 sudo xbps-install -S gcc make pkg-config cairo-devel libX11-devel
@@ -27,50 +27,39 @@ make test
 ./invest
 ```
 
-Se o compilador ainda reclamar de `cairo.h`, verifique:
-
-```sh
-pkg-config --cflags cairo
-```
-
-O aplicativo funciona em X11 ou XWayland. As fontes usam substituição via Cairo
-caso a fonte Inter não esteja instalada.
-
-Para instalar no menu do ambiente gráfico:
+Para instalar no diretório pessoal:
 
 ```sh
 make install PREFIX="$HOME/.local"
 ```
 
-## Arquivos de dados
+O programa precisa de X11 ou XWayland. Para renderizar textos com acentos, use uma fonte Unicode (DejaVu Sans ou Inter) e uma localidade UTF-8. O método de entrada de acentos e o Backspace da v0.3.8 foram preservados.
 
-Padrão: `~/.local/share/invest/` (ou `$XDG_DATA_HOME/invest/`).
+## Dados e migração
 
-- `cenarios.tsv`: simulações, juros, aportes e eventos.
-- `cenarios.tsv.bak`: cópia da última versão válida antes da gravação mais recente.
-- `cenarios.tsv.v1.bak` / `cenarios.tsv.v2.bak`: backups de migrações antigas, se existirem.
-- `orcamento.tsv`: receitas, despesas e valor reservado para investimento; não
-  foi alterado pela v0.3.6.
+Por padrão, o diretório de dados é `~/.local/share/invest/`, ou `$XDG_DATA_HOME/invest/` se a variável XDG estiver definida.
 
-**Antes de recuperar ou editar dados, feche o programa e faça backup da pasta:**
+- `cenarios.tsv` — simulações existentes, **sem alterações de formato**.
+- `orcamento.tsv` — orçamento mensal típico **legado** da v0.3.8, preservado e não sobrescrito pela v0.3.9.
+- `meses/2026-11.tsv`, `meses/2026-12.tsv` etc. — **novos arquivos de planejamento/realizado por mês**.
+- `meses/2026-11.tsv.bak` — cópia da gravação anterior do mês quando já existia.
+
+Na primeira abertura, se o mês atual ainda não possui arquivo mensal, o orçamento antigo de `orcamento.tsv` é importado **somente para o planejamento do mês atual**. O arquivo original permanece intacto. Para outros meses, comece com registros vazios ou clique em **Copiar anterior**. O programa não replica o orçamento automaticamente em todos os meses, para evitar lançamentos inventados.
+
+A nova versão salva arquivos mensais com gravação temporária seguida de substituição atômica. Se um arquivo mensal estiver corrompido, a leitura falha sem apagá-lo ou sobrescrevê-lo silenciosamente. Faça sempre um backup antes de atualizar:
 
 ```sh
 cp -a ~/.local/share/invest "$HOME/invest-backup-$(date +%Y%m%d-%H%M%S)"
 ```
 
-Para restaurar a cópia da última gravação, somente se o arquivo `.bak` existir:
+A v0.3.8 continua podendo ler o **antigo** `orcamento.tsv`, mas **não exibe** os novos registros mensais. Evite usar duas versões simultaneamente sobre a mesma pasta de dados.
+
+## Testes
 
 ```sh
-cp ~/.local/share/invest/cenarios.tsv.bak ~/.local/share/invest/cenarios.tsv
+make test
 ```
 
-A restauração substitui o arquivo atual pelos dados do backup (que podem não
-conter a última alteração). Não apague o diretório inteiro para corrigir problemas
-em um cenário.
+Valida o motor de simulações, persistência dos cenários, orçamento, UTF-8, composição de acentos e o novo armazenamento mensal. A interface também foi testada com X11 virtual: navegação de novembro a janeiro, cópia de planejamento, lançamento de receita realizada e persistência de dados.
 
-## Limites e validação
-
-Testes automatizados cobrem juros compostos, eventos, orçamento, nomes vazios,
-backup por gravação e proteção contra sobrescrever arquivos inválidos. A
-interface também foi verificada numa sessão X11 de teste, incluindo um nome
-apagado por Backspace, edição de outro campo e salvamento/reabertura.
+Licença MIT. Veja `LICENSE`.
