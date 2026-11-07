@@ -24,11 +24,14 @@ typedef struct {
 typedef struct {
     BudgetItem items[BUDGET_MAX_ITEMS];
     int count;
+    double monthly_investment; /* Reserva planejada para investir a cada mes. */
 } BudgetStore;
 
 typedef struct {
     double income;
     double expenses;
+    double monthly_investment;
+    double balance_before_investment;
     double fixed_expenses;
     double variable_expenses;
     double by_category[BUDGET_CATEGORY_COUNT];

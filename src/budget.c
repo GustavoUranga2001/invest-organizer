@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "budget.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,7 +40,9 @@ int budget_valid_item(const BudgetItem *item) {
 int budget_totals(const BudgetStore *store, BudgetTotals *out){
     long long in=0,expenses=0,fixed=0,variable=0,categories[BUDGET_CATEGORY_COUNT]={0};
     int i;
-    if(!store||!out||store->count<0||store->count>BUDGET_MAX_ITEMS)return -1;
+    if(!store||!out||store->count<0||store->count>BUDGET_MAX_ITEMS||
+       !isfinite(store->monthly_investment)||store->monthly_investment<0.0||
+       store->monthly_investment>1e12)return -1;
     for(i=0;i<store->count;i++){
         const BudgetItem *item=&store->items[i];
         long long c;
@@ -56,7 +59,12 @@ int budget_totals(const BudgetStore *store, BudgetTotals *out){
     memset(out,0,sizeof(*out));
     out->income=in/100.0;out->expenses=expenses/100.0;
     out->fixed_expenses=fixed/100.0;out->variable_expenses=variable/100.0;
-    out->balance=(in-expenses)/100.0;
+    {
+        long long allocated=llround(store->monthly_investment*100.0);
+        out->monthly_investment=allocated/100.0;
+        out->balance_before_investment=(in-expenses)/100.0;
+        out->balance=(in-expenses-allocated)/100.0;
+    }
     for(i=0;i<BUDGET_CATEGORY_COUNT;i++)out->by_category[i]=categories[i]/100.0;
     return 0;
 }
@@ -96,7 +104,17 @@ int budget_load(BudgetStore *store,char *err,size_t err_size){
     f=fopen(path,"r");
     if(!f && errno==ENOENT){memset(store,0,sizeof(*store));return 0;}
     if(!f){fail(err,err_size,"Falha ao abrir orcamento");return -1;}
-    if(!fgets(line,sizeof(line),f)||strcmp(line,"INVEST_BUDGET\t1\n"))goto invalid;
+    if(!fgets(line,sizeof(line),f))goto invalid;
+    if(strcmp(line,"INVEST_BUDGET\t1\n")==0){
+        /* Orcamentos da v0.3.3 continuam validos, com reserva inicial zero. */
+        tmp.monthly_investment=0.0;
+    }else if(strcmp(line,"INVEST_BUDGET\t2\n")==0){
+        double planned;char ch;
+        if(!fgets(line,sizeof(line),f)||
+           sscanf(line,"INVESTMENT\t%lf%c",&planned,&ch)!=2||ch!='\n'||
+           !isfinite(planned)||planned<0||planned>1e12)goto invalid;
+        tmp.monthly_investment=planned;
+    }else goto invalid;
     while(fgets(line,sizeof(line),f)){
         BudgetItem item={0};char *fields[5],*saveptr=NULL,*part;int n=0,kind,cat,fixed;
         if(!strchr(line,'\n'))goto invalid;
@@ -130,7 +148,7 @@ int budget_save(const BudgetStore *store,char *err,size_t err_size){
     if(fd<0){fail(err,err_size,"Nao foi possivel criar arquivo temporario");return -1;}
     f=fdopen(fd,"w");
     if(!f){close(fd);unlink(temp);fail(err,err_size,"Erro de escrita");return -1;}
-    if(fputs("INVEST_BUDGET\t1\n",f)==EOF)goto invalid;
+    if(fprintf(f,"INVEST_BUDGET\t2\nINVESTMENT\t%.2f\n",store->monthly_investment)<0)goto invalid;
     for(i=0;i<store->count;i++){
         const BudgetItem*it=&store->items[i];
         if(fprintf(f,"%d\t%s\t%.2f\t%d\t%d\n",it->kind,it->name,it->amount,it->category,it->fixed)<0)
@@ -138,6 +156,36 @@ int budget_save(const BudgetStore *store,char *err,size_t err_size){
     }
     if(fflush(f)!=0 || fsync(fd)!=0)goto invalid;
     if(fclose(f)!=0){unlink(temp);fail(err,err_size,"Falha ao fechar orcamento");return -1;}
+    /* Na migracao, preservar uma copia do orcamento original, sem substituir backups. */
+    {
+        FILE *original=fopen(path,"r");
+        if(original){
+            char header[64];
+            if(fgets(header,sizeof(header),original) && !strcmp(header,"INVEST_BUDGET\t1\n")){
+                char backup[PATH_MAX];int bn=snprintf(backup,sizeof(backup),"%s.v1.bak",path);
+                if(bn<0||(size_t)bn>=sizeof(backup)){fclose(original);unlink(temp);fail(err,err_size,"Caminho do backup longo demais");return -1;}
+                int bfd=open(backup,O_WRONLY|O_CREAT|O_EXCL,0600);
+                if(bfd>=0){
+                    char buffer[4096];size_t got;int good=1;
+                    rewind(original);
+                    while((got=fread(buffer,1,sizeof(buffer),original))>0){
+                        size_t off=0;
+                        while(off<got){ssize_t done=write(bfd,buffer+off,got-off);
+                            if(done<=0){good=0;break;}off+=(size_t)done;}
+                        if(!good)break;
+                    }
+                    if(ferror(original)||fsync(bfd)<0)good=0;
+                    if(close(bfd)<0)good=0;
+                    if(!good){unlink(backup);fclose(original);unlink(temp);fail(err,err_size,"Falha ao criar backup v1");return -1;}
+                }else if(errno!=EEXIST){
+                    fclose(original);unlink(temp);fail(err,err_size,"Falha ao abrir backup v1");return -1;
+                }
+            }
+            fclose(original);
+        }else if(errno!=ENOENT){
+            unlink(temp);fail(err,err_size,"Falha ao ler orcamento antigo");return -1;
+        }
+    }
     if(rename(temp,path)!=0){unlink(temp);fail(err,err_size,"Falha ao substituir orcamento");return -1;}
     return 0;
 invalid:

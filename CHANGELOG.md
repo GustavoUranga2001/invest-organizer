@@ -1,17 +1,9 @@
-# Histórico de versões
+# Changelog
 
-## v0.3.3 — Aba Finanças
-
-- Nova aba **FINANÇAS** na barra superior, atalho F4.
-- Cadastro de múltiplas receitas mensais e despesas mensais, com edição e exclusão confirmada.
-- Classificação de despesas por categoria e por tipo (fixa ou variável).
-- Resumo mensal: receitas, despesas, saldo previsto, percentual de renda comprometida e totais fixos/variáveis.
-- Arquivo independente `orcamento.tsv` no mesmo diretório XDG de dados, com gravação atômica e validação.
-- Preservação integral da aba de Eventos, das regras temporárias/permanentes, da comparação de cenários, da taxa anual equivalente e da paleta anterior.
-- Novos testes automatizados para o orçamento: soma, categorias, persistência e rejeição de dados corrompidos.
-
-## v0.3.2
-
-- Aportes mensais e taxas de juros temporários e permanentes.
-- Regras sobrepostas e retomada de valores anteriores ainda vigentes.
-- Compatibilidade com os cenários das versões anteriores.
+## 0.3.5
+- Fontes vetoriais antialiasadas com Cairo (em vez das fontes bitmap do X11).
+- Renderização UTF-8 direta e suporte a fontes do sistema.
+- Linhas dos gráficos desenhadas como trajetórias vetoriais suaves.
+- Bordas e cantos arredondados com antialiasing.
+- Fundo de janelas modais com transparência.
+- Fórmulas, interface, cores, armazenamento e funcionalidades da 0.3.4 preservados.

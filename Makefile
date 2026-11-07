@@ -2,13 +2,16 @@
 CC = cc
 CFLAGS = -std=c11 -O2 -Wall -Wextra -Wpedantic
 CPPFLAGS = -Isrc
-LDLIBS = -lX11 -lm
+# cairo is used only for antialiased vector painting; Xlib owns the window.
+CAIRO_CFLAGS = $(shell pkg-config --cflags cairo)
+CAIRO_LIBS = $(shell pkg-config --libs cairo)
+LDLIBS = -lX11 $(CAIRO_LIBS) -lm
 SRC = src/main.c src/finance.c src/storage.c src/budget.c
 
 all: invest
 
 invest: $(SRC) src/finance.h src/storage.h src/budget.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CAIRO_CFLAGS) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
 test: tests/test_finance.c tests/test_storage.c tests/test_budget.c src/finance.c src/storage.c src/budget.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-finance tests/test_finance.c src/finance.c -lm
