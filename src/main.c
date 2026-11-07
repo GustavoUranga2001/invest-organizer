@@ -14,9 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Invest v0.3.5: X11 nativo com Cairo para tipografia e curvas antialias.
+/* Invest v0.3.6: X11 nativo com Cairo para tipografia e curvas antialias.
  * Sem GTK, Qt, browser, rede ou formatos proprietarios. */
-#define APP_TITLE "invest 0.3.5"
+#define APP_TITLE "invest 0.3.6"
 #define SIDE 242
 #define MAX_CLICKS 240
 #define MAX_EDIT 128
@@ -481,6 +481,19 @@ static void begin_focus(Field f){
 static int end_focus(void){
     Field f=app.focus;
     if(f==F_NONE)return 0;
+    /* Nome vazio nunca deve bloquear a navegacao nem alterar o cenario.
+     * Descarta somente a edicao incompleta, preservando todos os dados. */
+    if(f==F_NAME){
+        const unsigned char *p=(const unsigned char*)app.input;
+        while(*p==' '||*p=='\t'||*p=='\r'||*p=='\n')p++;
+        if(!*p || strlen(app.input)>=sizeof(current()->name) ||
+           strpbrk(app.input,"\r\n\t")){
+            app.focus=F_NONE;app.sel_all=0;app.caret=0;
+            snprintf(app.input,sizeof(app.input),"%s",current()->name);
+            status("Nome invalido descartado. Dados do cenario preservados.",1);
+            return 1;
+        }
+    }
     if(f==F_EVENT_MONTH)snprintf(event_month_text,sizeof(event_month_text),"%s",app.input);
     else if(f==F_EVENT_VALUE)snprintf(event_value_text,sizeof(event_value_text),"%s",app.input);
     else if(f==F_EVENT_DURATION)snprintf(event_duration_text,sizeof(event_duration_text),"%s",app.input);
@@ -492,12 +505,17 @@ static int end_focus(void){
 }
 static void scenario_select(int n){
     if(n<0||n>=app.store.count)return;
-    end_focus();app.store.selected=n;modified();status("",0);
+    int rc=end_focus();
+    if(rc<0)return;
+    app.store.selected=n;
+    modified();
+    if(rc==0)status("",0);
 }
 static int list_visible(void);
 static void scenario_new(int duplicate){
     Scenario s;int num=1,i,used;
-    end_focus();if(app.store.count==INVEST_MAX_SCENARIOS){status("Limite de 32 cenarios.",1);return;}
+    if(end_focus()<0)return;
+    if(app.store.count==INVEST_MAX_SCENARIOS){status("Limite de 32 cenarios.",1);return;}
     s=duplicate?*current():(Scenario){0};
     if(!duplicate)scenario_default(&s);
     do {
@@ -537,7 +555,7 @@ static void draw_header(void){
     Rect savebtn={app.w-159,18,132,38};
     fill((Rect){0,0,app.w,74},SIDE_BG);
     txt(22,46,"invest",WHITE,app.f_title);
-    txt(106,42,"v0.3.5",SIDE_TEXT,app.f_small);
+    txt(106,42,"v0.3.6",SIDE_TEXT,app.f_small);
     header_tab((Rect){251,17,114,39},"SIMULADOR",app.view==SIMULATE,A_SCREEN_SIM);
     header_tab((Rect){374,17,96,39},"EVENTOS",app.view==EVENTS,A_SCREEN_EVENTS);
     header_tab((Rect){479,17,112,39},"COMPARAR",app.view==COMPARE,A_SCREEN_COMPARE);

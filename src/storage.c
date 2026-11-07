@@ -173,6 +173,43 @@ static int backup_legacy(const char *path)
     return rc;
 }
 
+/* Salva uma copia atomica da ultima versao valida antes de substitui-la.
+ * O backup "cenarios.tsv.bak" e atualizado a cada gravacao bem-sucedida.
+ * Nunca sobrescrevemos um backup com um arquivo original invalido. */
+static int backup_current(const char *path)
+{
+    char dest[PATH_MAX], temp[PATH_MAX], err[100];
+    char buf[4096];
+    size_t n;
+    FILE *src = NULL, *out = NULL;
+    ScenarioStore snapshot = {0};
+    int fd = -1, rc = -1;
+    if (access(path, F_OK) != 0) return errno == ENOENT ? 0 : -1;
+    if (storage_load(&snapshot, err, sizeof(err)) < 0) return -1;
+    if (snprintf(dest, sizeof(dest), "%s.bak", path) >= (int)sizeof(dest) ||
+        snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", dest) >= (int)sizeof(temp)) return -1;
+    src = fopen(path, "rb");
+    if (!src) return -1;
+    fd = mkstemp(temp);
+    if (fd < 0) goto finish;
+    out = fdopen(fd, "wb");
+    if (!out) { close(fd); fd = -1; goto finish; }
+    fd = -1; /* out owns the file descriptor */
+    while ((n = fread(buf, 1, sizeof(buf), src)) > 0)
+        if (fwrite(buf, 1, n, out) != n) goto finish;
+    if (ferror(src) || fflush(out) != 0 || fsync(fileno(out)) != 0) goto finish;
+    if (fclose(out) != 0) { out = NULL; goto finish; }
+    out = NULL;
+    if (rename(temp, dest) != 0) goto finish;
+    rc = 0;
+finish:
+    if (out) fclose(out);
+    if (fd >= 0) close(fd);
+    if (src) fclose(src);
+    if (rc != 0) unlink(temp);
+    return rc;
+}
+
 int storage_save(const ScenarioStore *store, char *error, size_t size)
 {
     char path[PATH_MAX], temp[PATH_MAX];
@@ -191,6 +228,10 @@ int storage_save(const ScenarioStore *store, char *error, size_t size)
         }
     if (backup_legacy(path) < 0) {
         fail(error, size, "Nao foi possivel criar backup da versao anterior");
+        return -1;
+    }
+    if (backup_current(path) < 0) {
+        fail(error, size, "Arquivo antigo invalido ou backup indisponivel; nada foi alterado");
         return -1;
     }
     n = snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", path);

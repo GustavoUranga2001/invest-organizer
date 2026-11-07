@@ -10,7 +10,7 @@
 
 int main(void)
 {
-    char dir[] = "/tmp/invest-test-XXXXXX", path[4096], bak[4112], bak2[4112];
+    char dir[] = "/tmp/invest-test-XXXXXX", path[4096], bak[4112], bak2[4112], current_bak[4112];
     char error[200] = {0}, buf[8192];
     ScenarioStore store = {0}, restored = {0};
     FILE *f;
@@ -64,6 +64,20 @@ int main(void)
     assert(restored.items[0].monthlies[0].end_month == 3);
     assert(restored.items[0].monthlies[1].end_month == 0);
     assert(restored.items[0].monthlies[1].value == 500);
+    /* A cada gravacao, a versao anterior fica em cenarios.tsv.bak.
+     * Se o nome nao for valido, o disco nao deve ser modificado. */
+    assert(snprintf(current_bak, sizeof(current_bak), "%s.bak", path) <
+           (int)sizeof(current_bak));
+    snprintf(restored.items[0].name, sizeof(restored.items[0].name), "Atualizado");
+    assert(storage_save(&restored, error, sizeof(error)) == 0);
+    f = fopen(current_bak, "r");
+    assert(f && fgets(buf, sizeof(buf), f) && fgets(buf, sizeof(buf), f));
+    assert(strncmp(buf, "Cenario 1\t", 9) == 0);
+    fclose(f);
+    restored.items[0].name[0] = '\0';
+    assert(storage_save(&restored, error, sizeof(error)) < 0);
+    assert(storage_load(&restored, error, sizeof(error)) == 0);
+    assert(strcmp(restored.items[0].name, "Atualizado") == 0);
     /* Migracao de arquivo v2 nao perde eventos e cria backup v2. */
     assert(snprintf(bak2, sizeof(bak2), "%s.v2.bak", path) < (int)sizeof(bak2));
     f = fopen(path, "w");
@@ -86,9 +100,16 @@ int main(void)
     fclose(f);
     assert(storage_load(&restored, error, sizeof(error)) == -1);
     assert(strcmp(error, "Arquivo de cenarios invalido: original preservado") == 0);
+    /* Nem uma gravacao posterior pode destruir um arquivo suspeito. */
+    assert(storage_save(&restored, error, sizeof(error)) < 0);
+    f = fopen(path, "r");
+    assert(f && fgets(buf, sizeof(buf), f) && fgets(buf, sizeof(buf), f));
+    assert(strcmp(buf, "Cenario invalido\n") == 0);
+    fclose(f);
     unlink(path);
     unlink(bak);
     unlink(bak2);
+    unlink(current_bak);
     { char sub[4096]; snprintf(sub, sizeof(sub), "%s/invest", dir); rmdir(sub); }
     rmdir(dir);
     puts("OK: migracoes v1/v2 -> v3, intervalos, backup e arquivo corrompido");

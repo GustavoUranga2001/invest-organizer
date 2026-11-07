@@ -25,6 +25,11 @@ int main(void)
     assert(close_to(annual_equivalent_rate(2.0), 26.824179));
     scenario_default(&s);
     assert(scenario_valid(&s));
+    /* Uma edicao que zere o nome nao pode ser persistida. */
+    s.name[0] = '\0';
+    assert(!scenario_valid(&s));
+    assert(project_scenario(&s, &p, NULL, NULL) < 0);
+    scenario_default(&s);
     assert(project_scenario(&s, &p, balances, principal) == 0);
     assert(close_to(p.final_balance, 38212.22));
     assert(close_to(p.contributions, 32440.66));
