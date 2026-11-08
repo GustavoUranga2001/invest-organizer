@@ -1,8 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
 #include "utf8.h"
+#include "safeio.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,13 +62,13 @@ static int parse_int(const char *s, int *out)
     return sscanf(s, "%d%c", out, &tail) == 1 ? 0 : -1;
 }
 
-int storage_load(ScenarioStore *store, char *error, size_t size)
+int storage_load_file(const char *path, ScenarioStore *store, char *error, size_t size)
 {
-    char path[PATH_MAX], line[8192];
+    char line[8192];
     FILE *f;
     int version, selected;
     ScenarioStore result = {0};
-    if (!store || storage_path(path, sizeof(path)) < 0) {
+    if (!store || !path) {
         fail(error, size, "Diretorio de dados indisponivel");
         return -1;
     }
@@ -131,6 +133,27 @@ malformed:
     return -1;
 }
 
+int storage_load(ScenarioStore *store, char *error, size_t size)
+{
+    char path[PATH_MAX];
+    if (storage_path(path, sizeof(path)) != 0) {
+        fail(error, size, "Diretorio de dados indisponivel");
+        return -1;
+    }
+    return storage_load_file(path, store, error, size);
+}
+
+int storage_validate_file(const char *path, void *context)
+{
+    ScenarioStore *tmp = calloc(1, sizeof(*tmp));
+    int rc;
+    (void)context;
+    if (!tmp) return -1;
+    rc = storage_load_file(path, tmp, NULL, 0);
+    free(tmp);
+    return rc;
+}
+
 /* Na primeira migracao, preserva uma copia dos formatos INVEST 1 ou 2. */
 static int backup_legacy(const char *path)
 {
@@ -142,6 +165,11 @@ static int backup_legacy(const char *path)
     in = fopen(path, "rb");
     if (!in) return errno == ENOENT ? 0 : -1;
     if (!fgets(header, sizeof(header), in)) {
+        fclose(in);
+        return -1;
+    }
+    /* Somente um original completo e válido pode virar backup legado. */
+    if (storage_validate_file(path, NULL) != 0) {
         fclose(in);
         return -1;
     }
@@ -163,10 +191,14 @@ static int backup_legacy(const char *path)
         return 0;
     }
     rewind(in);
-    out = fopen(backup, "wb");
-    if (!out) {
-        fclose(in);
-        return -1;
+    {
+        int backup_fd = open(backup, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        if (backup_fd < 0) {
+            fclose(in);
+            return errno == EEXIST ? 0 : -1;
+        }
+        out = fdopen(backup_fd, "wb");
+        if (!out) { close(backup_fd); unlink(backup); fclose(in); return -1; }
     }
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
         if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
@@ -174,43 +206,6 @@ static int backup_legacy(const char *path)
     if (fclose(out) != 0) rc = -1;
     fclose(in);
     if (rc) unlink(backup);
-    return rc;
-}
-
-/* Salva uma copia atomica da ultima versao valida antes de substitui-la.
- * O backup "cenarios.tsv.bak" e atualizado a cada gravacao bem-sucedida.
- * Nunca sobrescrevemos um backup com um arquivo original invalido. */
-static int backup_current(const char *path)
-{
-    char dest[PATH_MAX], temp[PATH_MAX], err[100];
-    char buf[4096];
-    size_t n;
-    FILE *src = NULL, *out = NULL;
-    ScenarioStore snapshot = {0};
-    int fd = -1, rc = -1;
-    if (access(path, F_OK) != 0) return errno == ENOENT ? 0 : -1;
-    if (storage_load(&snapshot, err, sizeof(err)) < 0) return -1;
-    if (snprintf(dest, sizeof(dest), "%s.bak", path) >= (int)sizeof(dest) ||
-        snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", dest) >= (int)sizeof(temp)) return -1;
-    src = fopen(path, "rb");
-    if (!src) return -1;
-    fd = mkstemp(temp);
-    if (fd < 0) goto finish;
-    out = fdopen(fd, "wb");
-    if (!out) { close(fd); fd = -1; goto finish; }
-    fd = -1; /* out owns the file descriptor */
-    while ((n = fread(buf, 1, sizeof(buf), src)) > 0)
-        if (fwrite(buf, 1, n, out) != n) goto finish;
-    if (ferror(src) || fflush(out) != 0 || fsync(fileno(out)) != 0) goto finish;
-    if (fclose(out) != 0) { out = NULL; goto finish; }
-    out = NULL;
-    if (rename(temp, dest) != 0) goto finish;
-    rc = 0;
-finish:
-    if (out) fclose(out);
-    if (fd >= 0) close(fd);
-    if (src) fclose(src);
-    if (rc != 0) unlink(temp);
     return rc;
 }
 
@@ -233,10 +228,6 @@ int storage_save(const ScenarioStore *store, char *error, size_t size)
         }
     if (backup_legacy(path) < 0) {
         fail(error, size, "Nao foi possivel criar backup da versao anterior");
-        return -1;
-    }
-    if (backup_current(path) < 0) {
-        fail(error, size, "Arquivo antigo invalido ou backup indisponivel; nada foi alterado");
         return -1;
     }
     n = snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", path);
@@ -278,9 +269,8 @@ int storage_save(const ScenarioStore *store, char *error, size_t size)
         fail(error, size, "Falha ao fechar arquivo de dados");
         return -1;
     }
-    if (rename(temp, path) != 0) {
+    if (safeio_commit(path, temp, storage_validate_file, NULL, error, size) != 0) {
         unlink(temp);
-        fail(error, size, "Falha ao substituir dados locais");
         return -1;
     }
     return 0;

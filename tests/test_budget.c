@@ -115,6 +115,9 @@ int main(void){
     assert(budget_save(&data,err,sizeof(err))<0);
     data.count=0;data.monthly_investment=0;assert(budget_totals(&data,&totals)==0);
     near(totals.balance,0);
+    /* O v0.3.11 recusa sobrescrever um arquivo suspeito. */
+    assert(budget_save(&data,err,sizeof(err))<0);
+    assert(unlink(path)==0); /* somente no diretório temporário do teste */
     assert(budget_save(&data,err,sizeof(err))==0);
     assert(budget_load(&copy,err,sizeof(err))==0 && copy.count==0);
     data.monthly_investment=-1.0;

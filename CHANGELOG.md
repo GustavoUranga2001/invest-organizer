@@ -1,35 +1,35 @@
 # Histórico de versões
 
-## v0.3.9
+## 0.3.11 — Estabilidade e proteção dos dados
 
-- Aba Finanças com seleção de mês e ano e valores independentes de **Planejado** e **Realizado**.
-- Receitas, despesas e investimentos mensais organizados por período, sem duplicação automática de lançamentos reais.
-- Botão para copiar o planejamento do mês anterior para um planejamento vazio.
-- Saldo previsto e realizado do mês em destaque, sem misturar o simulador com o orçamento.
-- Visão anual com gráficos de saldo, receitas, despesas e investimentos, distinguindo o planejado do realizado.
-- Armazenamento em `meses/AAAA-MM.tsv` com gravação atômica e backup `.bak`.
-- Importação não destrutiva de `orcamento.tsv` da v0.3.8 para o planejamento do primeiro mês.
-- Testes automatizados de períodos, persistência, backups, corrupção e valores financeiros.
-- Gráficos antialiasados, acentos, abas e simulações anteriores preservados.
+- Escrita atômica e sincronização de disco em cenários, orçamento e meses.
+- Backup rotativo `.bak` de versões válidas; nunca substituído por dados corrompidos.
+- `invest-doctor check` para validação sem modificar arquivos.
+- `invest-doctor recover` para recuperação explícita, preservando `.corrupt.*`.
+- Bloqueio de instância para prevenir gravações simultâneas.
+- Testes de regressão de corrupção, recuperação, acentos e cálculos.
+- Interface Dark Elegant, quatro abas, desempenho e formatos TSV preservados.
 
-## v0.3.8
+## 0.3.10 — Dark Elegant / otimizações para ThinkPad X200
 
-- Composição de acentos em campos de texto, incluindo `~` + `a` -> `ã`.
-- Suporte a agudo, grave, circunflexo, til, trema, cedilha e caracteres Unicode.
-- Composição alternativa quando XIM não estiver disponível, sem dependências adicionais.
-- Normalização de sequências combinantes comuns para caracteres precompostos.
-- Rótulos da interface com acentos, incluindo Cenários, Evolução e Orçamento.
-- Testes de letras minúsculas/maiúsculas, Backspace, XIM, fallback e persistência.
-- Formatos de arquivo e cálculos preservados.
+- Novo tema escuro (grafite-azulado, verde suave) para todas as quatro abas,
+  com contraste de texto corrigido também na barra lateral.
+- Abas superiores e fluxo de trabalho preservados.
+- Layout do simulador compactado para acomodar gráfico e resultados no painel
+  1280×800 do ThinkPad X200, mantendo a taxa equivalente anual.
+- Superfície antialiasada em `GOOD`, sem efeitos de blur ou animação.
+- Cache de cores RGB e seleção de fontes repetidas.
+- Repintura X11 otimizada: `Expose` usa cópia da área afetada do backbuffer.
+- Cache de dados do gráfico anual, invalidado ao navegar ou alterar orçamento.
+- Eventos de redimensionamento agrupados para reduzir a realocação de pixmaps.
+- Compilação incremental via `make`.
+- Formatos de dados preservados, sem migração.
 
-## v0.3.7
+## 0.3.9
 
-- Correção de Backspace e Delete com caracteres UTF-8 multibyte.
-- Proteção contra textos UTF-8 inválidos durante a renderização com Cairo.
-- Recuperação de nomes antigos danificados, preservando os dados financeiros.
-- Entrada inicial via XIM / `Xutf8LookupString`.
+- Orçamento por mês, planejado versus realizado, cópia de planejamento e
+  gráfico de evolução anual.
 
-## v0.3.6
+## 0.3.8
 
-- Validação de nomes vazios sem bloquear a navegação.
-- Backup de gravações de cenários em `cenarios.tsv.bak`.
+- Tratamento de UTF-8, teclas mortas e combinação de acentos.

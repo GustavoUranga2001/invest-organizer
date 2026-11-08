@@ -43,6 +43,8 @@ int budget_valid_item(const BudgetItem *item);
 int budget_totals(const BudgetStore *store, BudgetTotals *out);
 int budget_path(char *out, size_t size);
 int budget_load(BudgetStore *store, char *err, size_t err_size);
+int budget_load_file(const char *path, BudgetStore *store, char *err, size_t err_size);
+int budget_validate_file(const char *path, void *context);
 int budget_save(const BudgetStore *store, char *err, size_t err_size);
 
 #endif

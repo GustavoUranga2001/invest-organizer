@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "finance.h"
 #include "storage.h"
+#include "lock.h"
 #include "budget.h"
 #include "monthly.h"
 #include <time.h>
@@ -19,9 +20,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Invest v0.3.9: X11 nativo com Cairo para tipografia e curvas antialias.
- * Sem GTK, Qt, browser, rede ou formatos proprietarios. */
-#define APP_TITLE "invest 0.3.9"
+/* invest v0.3.11: Dark Elegant + renderizacao orientada a eventos.
+ * C11, Xlib e Cairo. Sem GTK, Qt, browser, timers ou polling. */
+#define APP_TITLE "invest 0.3.11"
 #define SIDE 242
 #define MAX_CLICKS 240
 #define MAX_EDIT 128
@@ -31,7 +32,7 @@
 typedef struct { int x,y,w,h; } Rect;
 typedef struct { double size; int bold; } AppFont;
 typedef enum {
-    BG, WHITE, INK, MUTED, BORDER, BLUE, BLUE_PALE, GREEN,
+    BG, CARD, INK, MUTED, BORDER, BLUE, BLUE_PALE, GREEN,
     GREEN_PALE, RED, RED_PALE, LIGHT, SIDE_BG, GRID, SHADOW, PURPLE,
     SIDE_ACTIVE, SIDE_TEXT, COLOR_COUNT
 } Color;
@@ -66,7 +67,13 @@ typedef struct {
     AppFont *f_small,*f_normal,*f_bold,*f_title,*f_number;
     cairo_surface_t *surface;
     cairo_t *cr;
-    int w,h,running,dirty,budget_dirty;
+    int w,h,running,dirty,budget_dirty,frame_ready;
+    const AppFont *last_font;
+    struct {
+        int valid, year;
+        double values[2][12][4];
+        signed char present[12], have[2][12];
+    } annual_cache;
     ScenarioStore store;
     BudgetStore budget; /* Active planned or actual budget. */
     MonthlyBudget monthly;
@@ -94,24 +101,43 @@ typedef struct {
 } App;
 
 static App app;
-/* Paleta original v0.2: cabecalho/lateral escuros, conteudo claro, acento verde.
- * Mantemos os nomes internos por compatibilidade com os componentes v0.3. */
+/* Dark Elegant: cores opacas e sem sombras/blur.
+ * As cores sao convertidas em RGB uma unica vez no inicio. */
 static const char *color_names[COLOR_COUNT] = {
-    "#F4F5F6", "#FFFFFF", "#182322", "#71817D", "#DDE3E1",
-    "#167259", "#DFF1E9", "#167259", "#DFF1E9", "#B83B40",
-    "#F9E9E9", "#EDF0F0", "#171F23", "#E6EBE9", "#E1E8E6", "#416CB7",
-    "#2A383C", "#B9CBC8"
+    "#111A22", /* BG */
+    "#1C2A34", /* CARD */
+    "#F1F4F5", /* INK */
+    "#A7B7C1", /* MUTED */
+    "#354751", /* BORDER */
+    "#79C8A9", /* BLUE: acento da interface */
+    "#2F5149", /* BLUE_PALE */
+    "#8DD7B2", /* GREEN */
+    "#244139", /* GREEN_PALE */
+    "#F19AA2", /* RED */
+    "#4B2D36", /* RED_PALE */
+    "#253641", /* LIGHT: campos */
+    "#17232D", /* SIDE_BG */
+    "#293943", /* GRID */
+    "#111A22", /* SHADOW (sem sombra real) */
+    "#8DAAD8", /* PURPLE: segundo cenario */
+    "#29423F", /* SIDE_ACTIVE */
+    "#BCCBD1"  /* SIDE_TEXT */
 };
-
+static double palette[COLOR_COUNT][3];
+static void palette_init(void){
+    for(int i=0;i<COLOR_COUNT;i++){
+        unsigned int r=0,g=0,b=0;
+        if(sscanf(color_names[i],"#%02x%02x%02x",&r,&g,&b)==3){
+            palette[i][0]=r/255.0; palette[i][1]=g/255.0; palette[i][2]=b/255.0;
+        }
+    }
+}
 static int inside(int x,int y,Rect r) { return x>=r.x && y>=r.y && x<r.x+r.w && y<r.y+r.h; }
 static int imin(int a,int b) { return a<b?a:b; }
 static int imax(int a,int b) { return a>b?a:b; }
-/* Paleta mantida; Cairo desenha em RGB, independente do visual do X11. */
 static void source_color(Color c) {
-    unsigned int r=0,g=0,b=0;
     if(c<0 || c>=COLOR_COUNT) c=INK;
-    if(sscanf(color_names[c],"#%02x%02x%02x",&r,&g,&b)!=3) return;
-    cairo_set_source_rgb(app.cr,r/255.0,g/255.0,b/255.0);
+    cairo_set_source_rgb(app.cr,palette[c][0],palette[c][1],palette[c][2]);
 }
 static void fill(Rect r,Color c) {
     if(r.w<=0 || r.h<=0)return;
@@ -147,13 +173,20 @@ static void rounded(Rect r,int radius,Color c) {
     cairo_fill(app.cr);
 }
 static void card(Rect r) {
-    rounded((Rect){r.x,r.y+3,r.w,r.h},13,SHADOW);
-    rounded(r,13,WHITE);
+    if(r.w<=0 || r.h<=0)return;
+    rounded(r,11,CARD);
+    /* Borda simples e discreta, sem sombras ou efeitos custosos. */
+    source_color(BORDER);
+    cairo_set_line_width(app.cr,1.0);
+    rounded_path((Rect){r.x+1,r.y+1,r.w-2,r.h-2},10);
+    cairo_stroke(app.cr);
 }
 static void font_set(const AppFont *font) {
+    if(font==app.last_font)return;
     cairo_select_font_face(app.cr,"Inter",CAIRO_FONT_SLANT_NORMAL,
                            font && font->bold?CAIRO_FONT_WEIGHT_BOLD:CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(app.cr,font?font->size:14.0);
+    app.last_font=font;
 }
 static void txt(int x,int y,const char *s,Color color,AppFont *font) {
     if(!s||!font)return;
@@ -248,6 +281,7 @@ static void budget_modified(void){
     if(app.budget_mode)app.monthly.actual=app.budget;
     else app.monthly.planned=app.budget;
     app.budget_dirty=1;
+    app.annual_cache.valid=0;
 }
 static void month_mode_set(int mode){
     if(mode==app.budget_mode)return;
@@ -267,6 +301,7 @@ static int month_open(int year,int month){
     app.monthly=next;app.budget_year=year;app.budget_month=month;
     app.budget=app.budget_mode?app.monthly.actual:app.monthly.planned;
     app.budget_scroll=0;
+    app.annual_cache.valid=0;
     status(rc==1?"Mês sem registros. Use + Adicionar ou Copiar anterior.":"",0);
     return 0;
 }
@@ -299,7 +334,7 @@ static int add_hit(Rect r,Action a,int arg) {
 static void button(Rect r,const char*title,int style,Action action,int arg) {
     char clipped[160];
     Color bg=style==1?BLUE:(style==2?BLUE_PALE:(style==3?RED_PALE:LIGHT));
-    Color fg=style==1?WHITE:(style==3?RED:(style==2?BLUE:INK));
+    Color fg=style==1?BG:(style==3?RED:(style==2?GREEN:INK));
     rounded(r,9,bg);
     cut_text(clipped,sizeof(clipped),title,r.w-20,app.f_bold);
     text_center(r,r.y+r.h/2+5,clipped,fg,app.f_bold);
@@ -311,9 +346,9 @@ static int end_focus(void);
 static void display_field(Rect r,const char*name,const char*value,Field field,const char *suffix) {
     char val[160];int active=app.focus==field;
     txt(r.x,r.y-11,name,MUTED,app.f_small);
-    rounded(r,9,active?BLUE_PALE:LIGHT);
+    rounded(r,8,active?BLUE_PALE:LIGHT);
     if(active) {
-        rounded((Rect){r.x+2,r.y+2,r.w-4,r.h-4},8,WHITE);
+        rounded((Rect){r.x+2,r.y+2,r.w-4,r.h-4},7,LIGHT);
         snprintf(val,sizeof(val),"%s",app.input);
     } else snprintf(val,sizeof(val),"%s",value);
     if(tw(val,app.f_bold)>r.w-(suffix?78:30)){
@@ -618,15 +653,18 @@ static void clamp_list(void){
 }
 /* As abas voltam para a faixa superior, como na versao 0.2. */
 static void header_tab(Rect r,const char *name,int selected,Action action){
-    rounded(r,3,selected?BLUE:SIDE_ACTIVE);
-    text_center(r,r.y+r.h/2+5,name,WHITE,app.f_bold);
+    if(selected){
+        rounded(r,7,SIDE_ACTIVE);
+        rounded((Rect){r.x+9,r.y+r.h-4,r.w-18,3},2,BLUE);
+    }
+    text_center(r,r.y+r.h/2+4,name,selected?INK:SIDE_TEXT,app.f_bold);
     add_hit(r,action,0);
 }
 static void draw_header(void){
     Rect savebtn={app.w-159,18,132,38};
     fill((Rect){0,0,app.w,74},SIDE_BG);
-    txt(22,46,"invest",WHITE,app.f_title);
-    txt(106,42,"v0.3.9",SIDE_TEXT,app.f_small);
+    txt(22,46,"invest.",INK,app.f_title);
+    txt(114,42,"v0.3.11",SIDE_TEXT,app.f_small);
     header_tab((Rect){251,17,114,39},"SIMULADOR",app.view==SIMULATE,A_SCREEN_SIM);
     header_tab((Rect){374,17,96,39},"EVENTOS",app.view==EVENTS,A_SCREEN_EVENTS);
     header_tab((Rect){479,17,112,39},"COMPARAR",app.view==COMPARE,A_SCREEN_COMPARE);
@@ -646,15 +684,15 @@ static void draw_side(void){
          txt(23,148,when,SIDE_TEXT,app.f_small);}
         line(22,130,SIDE-22,130,SIDE_ACTIVE);
         txt(23,177,"Receitas mensais",SIDE_TEXT,app.f_small);
-        money(t.income,text,sizeof(text));txt(23,207,text,WHITE,app.f_bold);
+        money(t.income,text,sizeof(text));txt(23,207,text,INK,app.f_bold);
         txt(23,253,"Despesas mensais",SIDE_TEXT,app.f_small);
-        money(t.expenses,text,sizeof(text));txt(23,283,text,WHITE,app.f_bold);
+        money(t.expenses,text,sizeof(text));txt(23,283,text,INK,app.f_bold);
         txt(23,329,"Reservado para investir",SIDE_TEXT,app.f_small);
-        money(t.monthly_investment,text,sizeof(text));txt(23,358,text,WHITE,app.f_bold);
+        money(t.monthly_investment,text,sizeof(text));txt(23,358,text,INK,app.f_bold);
         line(22,382,SIDE-22,382,SIDE_ACTIVE);
         txt(23,414,"SALDO DISPONIVEL",SIDE_TEXT,app.f_small);
         money(t.balance,text,sizeof(text));
-        txt(23,444,text,t.balance>=0?WHITE:RED,app.f_bold);
+        txt(23,444,text,t.balance>=0?INK:RED,app.f_bold);
         txt(23,512,"Orçamento mensal",SIDE_TEXT,app.f_small);
         txt(23,533,"sem conexão bancária.",SIDE_TEXT,app.f_small);
         txt(23,567,"Reserva sem vinculação",SIDE_TEXT,app.f_small);
@@ -671,11 +709,11 @@ static void draw_side(void){
         int n=i+app.sidebar_scroll;Rect r={13,142+i*62,SIDE-26,54};
         Scenario*s=&app.store.items[n];char title[80],sub[100];
         if(n==app.store.selected){
-            rounded(r,3,SIDE_ACTIVE);
-            fill((Rect){r.x,r.y,4,r.h},BLUE);
+            rounded(r,8,SIDE_ACTIVE);
+            rounded((Rect){r.x,r.y+8,3,r.h-16},2,BLUE);
         }
         cut_text(title,sizeof(title),s->name,r.w-28,app.f_bold);
-        txt(r.x+13,r.y+23,title,WHITE,app.f_bold);
+        txt(r.x+13,r.y+23,title,INK,app.f_bold);
         snprintf(sub,sizeof(sub),"%d meses  |  %.2f%% ao mês",s->months,s->rate_percent);
         txt(r.x+13,r.y+43,sub,SIDE_TEXT,app.f_small);
         add_hit(r,A_CHOOSE,n);
@@ -737,8 +775,22 @@ static void draw_graph(Rect r,const Scenario *a,const Scenario *b) {
         }
         cairo_stroke(app.cr);
     }
+    if(!b){
+        source_color(BLUE);
+        cairo_set_line_width(app.cr,1.0);
+        cairo_move_to(app.cr,plotx,ploty+ploth);
+        for(i=0;i<=a->months;i++){
+            double px=plotx+(double)plotw*i/end;
+            double py=ploty+ploth-(balancesA[i]/ymax)*ploth;
+            cairo_line_to(app.cr,px,py);
+        }
+        cairo_line_to(app.cr,plotx+plotw,ploty+ploth);
+        cairo_close_path(app.cr);
+        cairo_set_source_rgba(app.cr,palette[BLUE][0],palette[BLUE][1],palette[BLUE][2],0.11);
+        cairo_fill(app.cr);
+    }
     source_color(BLUE);
-    cairo_set_line_width(app.cr,2.7);
+    cairo_set_line_width(app.cr,2.5);
     cairo_set_line_join(app.cr,CAIRO_LINE_JOIN_ROUND);
     cairo_set_line_cap(app.cr,CAIRO_LINE_CAP_ROUND);
     for(i=0;i<=a->months;i++){
@@ -760,7 +812,7 @@ static void draw_graph(Rect r,const Scenario *a,const Scenario *b) {
     cairo_restore(app.cr);
     txt(r.x+25,r.y+27,b?"Evolução dos dois cenários":"Evolução do patrimônio",INK,app.f_bold);
     rounded((Rect){r.x+r.w-271,r.y+15,11,11},5,BLUE);
-    txt(r.x+r.w-252,r.y+25,b?"Cenário A":"Patrimonio",MUTED,app.f_small);
+    txt(r.x+r.w-252,r.y+25,b?"Cenário A":"Patrimônio",MUTED,app.f_small);
     rounded((Rect){r.x+r.w-131,r.y+15,11,11},5,PURPLE);
     txt(r.x+r.w-112,r.y+25,b?"Cenário B":"Investido",MUTED,app.f_small);
 }
@@ -771,48 +823,48 @@ static void draw_sim(void){
     if(project_scenario(s,&p,NULL,NULL)<0){
         memset(&p,0,sizeof(p));status("Projecao fora da escala numerica.",1);
     }
-    display_field((Rect){x,110,w-268,43},"Nome do cenário",s->name,F_NAME,NULL);
-    button((Rect){x+w-236,112,112,39},"Duplicar",0,A_DUPLICATE,0);
-    button((Rect){x+w-112,112,112,39},"Excluir",3,A_DELETE,0);
-    txt(x,176,"Preencha os campos e veja sua projeção em tempo real.",MUTED,app.f_normal);
-    r=(Rect){x,192,w,214};card(r);
-    txt(x+22,218,"Dados do investimento",INK,app.f_bold);
-    button((Rect){x+w-212,200,189,32},"Eventos e aportes  >",2,A_OPEN_EVENTS,0);
+    display_field((Rect){x,99,w-268,43},"Nome do cenário",s->name,F_NAME,NULL);
+    button((Rect){x+w-236,100,112,39},"Duplicar",0,A_DUPLICATE,0);
+    button((Rect){x+w-112,100,112,39},"Excluir",3,A_DELETE,0);
+    txt(x,163,"Preencha os campos e acompanhe o patrimônio projetado.",MUTED,app.f_normal);
+    r=(Rect){x,179,w,199};card(r);
+    txt(x+22,206,"Dados do investimento",INK,app.f_bold);
+    button((Rect){x+w-212,188,189,32},"Eventos e aportes  >",2,A_OPEN_EVENTS,0);
     number(s->initial,b1,sizeof(b1));number(s->monthly,b2,sizeof(b2));
     number(s->rate_percent,b3,sizeof(b3));snprintf(b4,sizeof(b4),"%d",s->months);
-    display_field((Rect){x+24,250,half-6,41},"Valor inicial",b1,F_INITIAL,"R$");
-    display_field((Rect){x+31+half,250,half-6,41},"Aporte mensal",b2,F_MONTHLY,"R$");
-    display_field((Rect){x+24,322,half-6,41},"Juros por mês",b3,F_RATE,"%");
-    display_field((Rect){x+31+half,322,half-6,41},"Prazo",b4,F_MONTHS,"meses");
+    display_field((Rect){x+24,234,half-6,41},"Valor inicial",b1,F_INITIAL,"R$");
+    display_field((Rect){x+31+half,234,half-6,41},"Aporte mensal",b2,F_MONTHLY,"R$");
+    display_field((Rect){x+24,299,half-6,41},"Juros por mês",b3,F_RATE,"%");
+    display_field((Rect){x+31+half,299,half-6,41},"Prazo",b4,F_MONTHS,"meses");
     /* Equivalencia composta: (1 + taxa mensal/100)^12 - 1. Taxa BASE,
        mesmo quando o cenario inclui mudancas futuras na aba Eventos. */
     {
         double annual=annual_equivalent_rate(s->rate_percent);
         char percent[40];
         number(annual,percent,sizeof(percent));
-        txt(x+24,389,s->rate_count?"Taxa base anual equivalente:":"Taxa anual equivalente:",MUTED,app.f_small);
+        txt(x+24,362,s->rate_count?"Taxa base anual equivalente:":"Taxa anual equivalente:",MUTED,app.f_small);
         txt(x+24+tw(s->rate_count?"Taxa base anual equivalente:":"Taxa anual equivalente:",app.f_small)+8,
-            389,percent,GREEN,app.f_bold);
+            362,percent,GREEN,app.f_bold);
         txt(x+24+tw(s->rate_count?"Taxa base anual equivalente:":"Taxa anual equivalente:",app.f_small)+
-            tw(percent,app.f_bold)+12,389,"% a.a.",GREEN,app.f_small);
+            tw(percent,app.f_bold)+12,362,"% a.a.",GREEN,app.f_small);
         if(s->rate_count||s->monthly_count||s->extra_count){
             char changes[96];
             snprintf(changes,sizeof(changes),"%d juros | %d mensais | %d extras",s->rate_count,s->monthly_count,s->extra_count);
-            txt(x+31+half,389,changes,MUTED,app.f_small);
+            txt(x+31+half,362,changes,MUTED,app.f_small);
         }
     }
-    r=(Rect){x,418,w,124};card(r);
-    txt(x+24,443,"Resultado projetado",INK,app.f_bold);
+    r=(Rect){x,389,w,117};card(r);
+    txt(x+24,413,"Resultado projetado",INK,app.f_bold);
     money(p.final_balance,b1,sizeof(b1));
-    txt(x+24,483,b1,INK,app.f_number);
-    txt(x+24,515,"Montante final estimado",MUTED,app.f_small);
-    line(x+w/2,443,x+w/2,528,BORDER);
+    txt(x+24,452,b1,INK,app.f_number);
+    txt(x+24,488,"Montante final estimado",MUTED,app.f_small);
+    line(x+w/2,410,x+w/2,496,BORDER);
     money(p.contributions,b2,sizeof(b2));money(p.earnings,b3,sizeof(b3));
-    txt(x+w/2+20,455,"Total investido",MUTED,app.f_small);
-    txt(x+w/2+20,479,b2,INK,app.f_bold);
-    txt(x+w/2+20,501,"Juros acumulados",MUTED,app.f_small);
-    txt(x+w/2+20,526,b3,p.earnings>=0?GREEN:RED,app.f_bold);
-    r=(Rect){x,555,w,app.h-607};card(r);
+    txt(x+w/2+20,419,"Total investido",MUTED,app.f_small);
+    txt(x+w/2+20,442,b2,INK,app.f_bold);
+    txt(x+w/2+20,465,"Juros acumulados",MUTED,app.f_small);
+    txt(x+w/2+20,491,b3,p.earnings>=0?GREEN:RED,app.f_bold);
+    r=(Rect){x,518,w,app.h-571};card(r);
     draw_graph(r,s,NULL);
 }
 static void draw_compare(void){
@@ -849,7 +901,7 @@ static void draw_compare(void){
                            pa.final_balance<pb.final_balance?"Cenario B tem maior montante":"Montantes equivalentes";
         txt(x+w/2,460,winner,MUTED,app.f_normal);
     }
-    r=(Rect){x,512,w,app.h-571};card(r);
+    r=(Rect){x,512,w,app.h-588};card(r);
     draw_graph(r,a,b);
     txt(x,app.h-51,"Comparacao nominal, sem impostos ou inflacao.",MUTED,app.f_small);
 }
@@ -878,12 +930,37 @@ static double monthly_metric(const BudgetTotals *t,int metric){
     default:return t->balance;
     }
 }
+/* Cache anual: a v0.3.9 consultava ate 12 arquivos em CADA repintura.
+ * Agora a leitura so ocorre ao entrar no ano ou alterar seus registros. */
+static void ensure_annual_cache(void){
+    if(app.annual_cache.valid && app.annual_cache.year==app.budget_year)return;
+    memset(&app.annual_cache,0,sizeof(app.annual_cache));
+    app.annual_cache.year=app.budget_year;
+    for(int m=1;m<=12;m++){
+        MonthlyBudget data={0};char err[180];int rc;
+        if(m==app.budget_month){data=app.monthly;rc=0;}
+        else rc=monthly_load(app.budget_year,m,&data,err,sizeof(err));
+        if(rc<0){app.annual_cache.present[m-1]=-1;continue;}
+        if(rc==1)continue;
+        app.annual_cache.present[m-1]=1;
+        for(int mode=0;mode<2;mode++){
+            const BudgetStore *b=mode?&data.actual:&data.planned;
+            BudgetTotals t;
+            if(budget_totals(b,&t)<0)continue;
+            app.annual_cache.have[mode][m-1]=(b->count>0||b->monthly_investment>0);
+            for(int metric=0;metric<4;metric++)
+                app.annual_cache.values[mode][m-1][metric]=monthly_metric(&t,metric);
+        }
+    }
+    app.annual_cache.valid=1;
+}
 static void draw_year_chart(Rect r){
     static const char *const labels[]={"Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"};
     static const char *const metrics[]={"Saldo disponível","Receitas","Despesas","Investimentos"};
-    double values[2][12]={{0}},mn=0,mx=0;int present[12]={0};int have[2][12]={{0}};
+    double mn=0,mx=0;
     int x=r.x+25,y=r.y+83,w=r.w-50,h=r.h-145;
-    char buf[100],title[140],err[180];
+    char buf[100],title[140];
+    ensure_annual_cache();
     card(r);
     snprintf(title,sizeof(title),"Evolução de %s em %d",metrics[app.chart_metric],app.budget_year);
     txt(r.x+19,r.y+32,title,INK,app.f_bold);
@@ -892,21 +969,10 @@ static void draw_year_chart(Rect r){
     txt(r.x+40,r.y+58,"Planejado",MUTED,app.f_small);
     rounded((Rect){r.x+142,r.y+47,12,12},3,PURPLE);
     txt(r.x+161,r.y+58,"Realizado",MUTED,app.f_small);
-    for(int m=1;m<=12;m++){
-        MonthlyBudget month={0};int rc;
-        if(m==app.budget_month){month=app.monthly;rc=0;}
-        else rc=monthly_load(app.budget_year,m,&month,err,sizeof(err));
-        if(rc<0){present[m-1]=-1;continue;}
-        if(rc==1)continue;
-        present[m-1]=1;
-        BudgetTotals t;
-        if(budget_totals(&month.planned,&t)==0)values[0][m-1]=monthly_metric(&t,app.chart_metric);
-        if(budget_totals(&month.actual,&t)==0)values[1][m-1]=monthly_metric(&t,app.chart_metric);
-        have[0][m-1]=month.planned.count>0||month.planned.monthly_investment>0.0;
-        have[1][m-1]=month.actual.count>0||month.actual.monthly_investment>0.0;
-        for(int mode=0;mode<2;mode++)if(have[mode][m-1]){
-            mn=fmin(mn,values[mode][m-1]);mx=fmax(mx,values[mode][m-1]);
-        }
+    for(int m=0;m<12;m++)for(int mode=0;mode<2;mode++){
+        if(!app.annual_cache.have[mode][m])continue;
+        double v=app.annual_cache.values[mode][m][app.chart_metric];
+        mn=fmin(mn,v);mx=fmax(mx,v);
     }
     if(h<60){txt(x,r.y+104,"Aumente a janela para ver o gráfico anual.",MUTED,app.f_small);return;}
     if(mx-mn<1.0){mx+=1;mn-=1;}
@@ -925,16 +991,16 @@ static void draw_year_chart(Rect r){
      if(zero>=y&&zero<=y+h)line(x,zero,x+w,zero,BORDER);}
     for(int m=0;m<12;m++){
         int center=x+(m*2+1)*w/24,bw=imax(5,imin(13,w/42));
-        if(present[m]==1){
+        if(app.annual_cache.present[m]==1){
             for(int mode=0;mode<2;mode++){
-                if(!have[mode][m])continue;
-                double v=values[mode][m];
+                if(!app.annual_cache.have[mode][m])continue;
+                double v=app.annual_cache.values[mode][m][app.chart_metric];
                 int yy=y+h-(int)round((v-mn)/range*h);
                 int zy=y+h-(int)round((0-mn)/range*h);
                 int top=imin(yy,zy),hh=abs(yy-zy);
                 rounded((Rect){center+(mode?2:-bw-2),top,bw,imax(2,hh)},2,mode?PURPLE:BLUE);
             }
-        }else if(present[m]<0){
+        }else if(app.annual_cache.present[m]<0){
             txt(center-4,y+h/2,"!",RED,app.f_bold);
         }
         txt(center-11,y+h+21,labels[m],m+1==app.budget_month?BLUE:MUTED,app.f_small);
@@ -1215,8 +1281,16 @@ static void paint(void){
         }
     }
     cairo_surface_flush(app.surface);
+    app.frame_ready=1;
     XCopyArea(app.dpy,app.back,app.win,app.gc,0,0,(unsigned)app.w,(unsigned)app.h,0,0);
     XFlush(app.dpy);
+}
+/* Expose so copia pixels prontos. Nao recalcula graficos nem consulta disco. */
+static void present_exposed(const XExposeEvent *ev){
+    if(!app.frame_ready){paint();return;}
+    int x=imax(0,ev->x),y=imax(0,ev->y);
+    int w=imin(ev->width,app.w-x),h=imin(ev->height,app.h-y);
+    if(w>0&&h>0)XCopyArea(app.dpy,app.back,app.win,app.gc,x,y,(unsigned)w,(unsigned)h,x,y);
 }
 static void launch_event_editor(int idx){
     app.event_edit_index=idx;
@@ -1445,6 +1519,7 @@ static AppFont font_title={23.0,1};
 static AppFont font_number={26.0,1};
 /* Recreate Cairo's target when the X11 window is resized. */
 static int make_surface(void){
+    app.frame_ready=0;app.last_font=NULL;
     if(app.cr){cairo_destroy(app.cr);app.cr=NULL;}
     if(app.surface){cairo_surface_destroy(app.surface);app.surface=NULL;}
     if(app.back) XFreePixmap(app.dpy,app.back);
@@ -1455,7 +1530,8 @@ static int make_surface(void){
     if(cairo_surface_status(app.surface)!=CAIRO_STATUS_SUCCESS)return -1;
     app.cr=cairo_create(app.surface);
     if(cairo_status(app.cr)!=CAIRO_STATUS_SUCCESS)return -1;
-    cairo_set_antialias(app.cr,CAIRO_ANTIALIAS_BEST);
+    /* GOOD e bem mais leve que BEST e nao muda a aparencia perceptivelmente. */
+    cairo_set_antialias(app.cr,CAIRO_ANTIALIAS_GOOD);
     return 0;
 }
 static void shutdown(void){
@@ -1473,8 +1549,14 @@ static int setup(void){
     app.dpy=XOpenDisplay(NULL);
     if(!app.dpy){fprintf(stderr,"invest: nao foi possivel abrir o X11 (DISPLAY)\n");return -1;}
     app.screen=DefaultScreen(app.dpy);
-    app.w=1120;app.h=832;
-    app.win=XCreateSimpleWindow(app.dpy,RootWindow(app.dpy,app.screen),80,60,
+    /* O ThinkPad X200 costuma ter painel de 1280x800. O tamanho inicial
+     * deixa espaco para a decoracao da janela e o painel do ambiente. */
+    app.w=imin(1120,DisplayWidth(app.dpy,app.screen)-80);
+    app.h=imin(780,DisplayHeight(app.dpy,app.screen)-60);
+    app.w=imax(MIN_W,app.w);app.h=imax(MIN_H,app.h);
+    int start_x=imax(0,(DisplayWidth(app.dpy,app.screen)-app.w)/2);
+    int start_y=imax(10,(DisplayHeight(app.dpy,app.screen)-app.h)/2-12);
+    app.win=XCreateSimpleWindow(app.dpy,RootWindow(app.dpy,app.screen),start_x,start_y,
                                 (unsigned)app.w,(unsigned)app.h,0,0,WhitePixel(app.dpy,app.screen));
     XStoreName(app.dpy,app.win,APP_TITLE);
     hints.flags=PMinSize;hints.min_width=MIN_W;hints.min_height=MIN_H;
@@ -1503,9 +1585,10 @@ int main(void){
     XEvent ev;char err[180]={0};
     (void)setlocale(LC_CTYPE,"");
     if(XSupportsLocale())XSetLocaleModifiers("");
-    memset(&app,0,sizeof(app));app.focus=F_NONE;
+    memset(&app,0,sizeof(app));app.focus=F_NONE;palette_init();
+    if(invest_lock_acquire(err,sizeof(err))<0){fprintf(stderr,"invest: %s\n",err);return EXIT_FAILURE;}
     if(storage_load(&app.store,err,sizeof(err))<0){
-        fprintf(stderr,"invest: %s\nNenhum arquivo existente foi alterado.\n",err);
+        fprintf(stderr,"invest: %s\nNenhum arquivo existente foi alterado. Execute invest-doctor check.\n",err);
         return EXIT_FAILURE;
     }
     {
@@ -1515,11 +1598,11 @@ int main(void){
         app.budget_year=today->tm_year+1900;
         app.budget_month=today->tm_mon+1;
         rc=monthly_load(app.budget_year,app.budget_month,&app.monthly,err,sizeof(err));
-        if(rc<0){fprintf(stderr,"invest: %s\nDados existentes preservados.\n",err);return EXIT_FAILURE;}
+        if(rc<0){fprintf(stderr,"invest: %s\nDados existentes preservados. Execute invest-doctor check.\n",err);return EXIT_FAILURE;}
         if(rc==1){
             /* Legacy is an initial template, never overwritten by the new model. */
             if(budget_load(&legacy,err,sizeof(err))<0){
-                fprintf(stderr,"invest: %s\nNenhum arquivo existente foi alterado.\n",err);
+                fprintf(stderr,"invest: %s\nNenhum arquivo existente foi alterado. Execute invest-doctor check.\n",err);
                 return EXIT_FAILURE;
             }
             if(legacy.count||legacy.monthly_investment>0){
@@ -1550,12 +1633,19 @@ int main(void){
         }
         if(XFilterEvent(&ev,app.win))continue;
         switch(ev.type){
-        case Expose:if(!ev.xexpose.count)paint();break;
+        case Expose:present_exposed(&ev.xexpose);break;
         case ButtonPress:mouse_press(ev.xbutton.x,ev.xbutton.y,ev.xbutton.button);paint();break;
         case KeyPress:handle_key(&ev.xkey);paint();break;
         case FocusIn:if(app.ic)XSetICFocus(app.ic);break;
         case FocusOut:if(app.ic)XUnsetICFocus(app.ic);break;
         case ConfigureNotify:
+            {
+                XEvent newer;
+                /* Descarte dimensoes intermediarias ao arrastar bordas:
+                 * uma alocacao de pixmap para a ultima medida apenas. */
+                while(XCheckTypedWindowEvent(app.dpy,app.win,ConfigureNotify,&newer))
+                    ev=newer;
+            }
             if(app.w!=ev.xconfigure.width||app.h!=ev.xconfigure.height){
                 app.w=ev.xconfigure.width;app.h=ev.xconfigure.height;
                 if(make_surface()<0){fprintf(stderr,"invest: erro no redimensionamento\n");app.running=0;break;}
@@ -1570,5 +1660,5 @@ int main(void){
         default:break;
         }
     }
-    shutdown();return EXIT_SUCCESS;
+    shutdown();invest_lock_release();return EXIT_SUCCESS;
 }

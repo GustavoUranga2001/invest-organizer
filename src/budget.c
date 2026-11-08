@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "budget.h"
 #include "utf8.h"
+#include "safeio.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -98,10 +99,10 @@ static int parse_amount_strict(const char *s,double *n){
     return sscanf(s,"%lf%c",n,&tail)==1?0:-1;
 }
 
-int budget_load(BudgetStore *store,char *err,size_t err_size){
+int budget_load_file(const char *path,BudgetStore *store,char *err,size_t err_size){
     BudgetStore tmp={0};
-    char path[PATH_MAX],line[1024];FILE*f;
-    if(!store||budget_path(path,sizeof(path))<0){fail(err,err_size,"Pasta de orcamento indisponivel");return -1;}
+    char line[1024];FILE*f;
+    if(!store||!path){fail(err,err_size,"Pasta de orcamento indisponivel");return -1;}
     f=fopen(path,"r");
     if(!f && errno==ENOENT){memset(store,0,sizeof(*store));return 0;}
     if(!f){fail(err,err_size,"Falha ao abrir orcamento");return -1;}
@@ -139,6 +140,19 @@ invalid:
     fclose(f);fail(err,err_size,"Orcamento invalido; arquivo original preservado");return -1;
 }
 
+int budget_load(BudgetStore *store,char *err,size_t err_size){
+    char path[PATH_MAX];
+    if(budget_path(path,sizeof(path))<0){fail(err,err_size,"Pasta de orçamento indisponível");return -1;}
+    return budget_load_file(path,store,err,err_size);
+}
+int budget_validate_file(const char *path,void *context){
+    BudgetStore *tmp=calloc(1,sizeof(*tmp));int rc;
+    (void)context;
+    if(!tmp)return -1;
+    rc=budget_load_file(path,tmp,NULL,0);
+    free(tmp);return rc;
+}
+
 int budget_save(const BudgetStore *store,char *err,size_t err_size){
     char path[PATH_MAX],temp[PATH_MAX];
     BudgetTotals totals;FILE*f;int fd,i,n;
@@ -164,6 +178,10 @@ int budget_save(const BudgetStore *store,char *err,size_t err_size){
         if(original){
             char header[64];
             if(fgets(header,sizeof(header),original) && !strcmp(header,"INVEST_BUDGET\t1\n")){
+                if(budget_validate_file(path,NULL)!=0){
+                    fclose(original);unlink(temp);
+                    fail(err,err_size,"Orçamento antigo inválido; backup preservado");return -1;
+                }
                 char backup[PATH_MAX];int bn=snprintf(backup,sizeof(backup),"%s.v1.bak",path);
                 if(bn<0||(size_t)bn>=sizeof(backup)){fclose(original);unlink(temp);fail(err,err_size,"Caminho do backup longo demais");return -1;}
                 int bfd=open(backup,O_WRONLY|O_CREAT|O_EXCL,0600);
@@ -188,7 +206,7 @@ int budget_save(const BudgetStore *store,char *err,size_t err_size){
             unlink(temp);fail(err,err_size,"Falha ao ler orcamento antigo");return -1;
         }
     }
-    if(rename(temp,path)!=0){unlink(temp);fail(err,err_size,"Falha ao substituir orcamento");return -1;}
+    if(safeio_commit(path,temp,budget_validate_file,NULL,err,err_size)!=0){unlink(temp);return -1;}
     return 0;
 invalid:
     fclose(f);unlink(temp);fail(err,err_size,"Falha ao salvar orcamento");return -1;

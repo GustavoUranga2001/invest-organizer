@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "monthly.h"
 #include "utf8.h"
+#include "safeio.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -56,9 +57,9 @@ static int parse_item(char *line,BudgetStore *store){
     store->items[store->count++]=item;
     return 0;
 }
-int monthly_load(int year,int month,MonthlyBudget*out,char*err,size_t err_size){
-    char path[PATH_MAX],line[1024],header[100];int have_p=0,have_r=0;FILE*f;MonthlyBudget *temp;
-    if(!out||monthly_path(year,month,path,sizeof(path))<0){fail(err,err_size,"Data mensal inválida");return -1;}
+int monthly_load_file(const char *path,int year,int month,MonthlyBudget*out,char*err,size_t err_size){
+    char line[1024],header[100];int have_p=0,have_r=0;FILE*f;MonthlyBudget *temp;
+    if(!out||!path||!date_valid(year,month)){fail(err,err_size,"Data mensal inválida");return -1;}
     f=fopen(path,"r");
     if(!f){if(errno==ENOENT){memset(out,0,sizeof(*out));return 1;}fail(err,err_size,"Falha ao abrir orçamento mensal");return -1;}
     temp=calloc(1,sizeof(*temp));
@@ -91,8 +92,21 @@ int monthly_load(int year,int month,MonthlyBudget*out,char*err,size_t err_size){
 invalid:
     fclose(f);free(temp);fail(err,err_size,"Arquivo mensal inválido; original preservado");return -1;
 }
+int monthly_load(int year,int month,MonthlyBudget*out,char*err,size_t err_size){
+    char path[PATH_MAX];
+    if(monthly_path(year,month,path,sizeof(path))<0){fail(err,err_size,"Mês inválido");return -1;}
+    return monthly_load_file(path,year,month,out,err,err_size);
+}
+int monthly_validate_file(const char *path,void *context){
+    const int *date=(const int *)context;
+    MonthlyBudget *tmp=calloc(1,sizeof(*tmp));int rc;
+    if(!tmp||!date){free(tmp);return -1;}
+    rc=monthly_load_file(path,date[0],date[1],tmp,NULL,0);
+    free(tmp);return rc;
+}
+
 int monthly_save(int year,int month,const MonthlyBudget*data,char*err,size_t err_size){
-    char path[PATH_MAX],temp[PATH_MAX],backup[PATH_MAX];BudgetTotals totals;
+    char path[PATH_MAX],temp[PATH_MAX];BudgetTotals totals;
     int fd,i,n;FILE*f;
     if(!data||budget_totals(&data->planned,&totals)<0||budget_totals(&data->actual,&totals)<0||
        monthly_path(year,month,path,sizeof(path))<0||ensure_dirs(path)<0){
@@ -117,15 +131,11 @@ int monthly_save(int year,int month,const MonthlyBudget*data,char*err,size_t err
     }
     if(fflush(f)!=0||fsync(fd)!=0)goto failed;
     if(fclose(f)!=0){unlink(temp);fail(err,err_size,"Falha ao fechar arquivo mensal");return -1;}
-    /* Back up the last valid version before replacement (source file stays intact). */
-    {struct stat st;
-     if(stat(path,&st)==0){
-         int bn=snprintf(backup,sizeof(backup),"%s.bak",path);
-         if(bn<0||(size_t)bn>=sizeof(backup)){unlink(temp);fail(err,err_size,"Backup: caminho muito longo");return -1;}
-         if(unlink(backup)<0&&errno!=ENOENT){unlink(temp);fail(err,err_size,"Falha ao renovar backup");return -1;}
-         if(link(path,backup)<0){unlink(temp);fail(err,err_size,"Falha ao criar backup");return -1;}
-     }else if(errno!=ENOENT){unlink(temp);fail(err,err_size,"Falha ao verificar arquivo original");return -1;}}
-    if(rename(temp,path)!=0){unlink(temp);fail(err,err_size,"Falha ao gravar mês");return -1;}
+    /* Atomic replacement and a verified last-known-good backup. */
+    {int date[2]={year,month};
+     if(safeio_commit(path,temp,monthly_validate_file,date,err,err_size)!=0){
+         unlink(temp);return -1;
+     }}
     return 0;
 failed:
     fclose(f);unlink(temp);fail(err,err_size,"Falha ao gravar mês");return -1;
