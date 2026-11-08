@@ -1,8 +1,42 @@
-# invest v0.3.11 — Dark Elegant / Proteção de dados
+# invest v0.3.12 — Dark Elegant / Indicadores econômicos
 
 Simulador de investimentos e organizador de finanças pessoais, **nativo para Linux**.
 Construído em C11 + Xlib + Cairo, sem GTK, Qt, Electron, navegador, banco de dados,
 telemetria ou conexão obrigatória à internet.
+
+## Novo na v0.3.12 — Mercado na barra lateral
+
+A barra lateral exibe **Selic-meta (% a.a.)**, **dólar e euro PTAX (venda,
+BRL)** e **Bitcoin/Monero (preços de referência em BRL)**. Há um botão
+**Atualizar mercado**. O app também tenta atualizar uma vez ao abrir caso os
+dados estejam ausentes ou a última consulta tenha mais de 15 minutos.
+
+- **Banco Central do Brasil (SGS 432):** Selic-meta definida pelo Copom,
+  distinta da taxa Selic efetiva e do rendimento de aplicações.
+- **Banco Central (PTAX/OData):** valor de venda do último boletim disponível
+  para USD e EUR. É uma cotação de referência, não um preço de compra e venda
+  em bancos ou corretoras, nem cotação de mercado em tempo real.
+- **CoinPaprika (API de tickers):** preços indicativos agregados em BRL
+  de BTC e XMR. A API tem limites, termos de uso e pode ficar indisponível.
+- **Cotações são informativas:** não afetam cálculos, orçamento nem criam
+  operações financeiras automaticamente. Nenhum valor é inventado quando a
+  consulta falha: é exibido `--` ou o último valor local com data da consulta.
+- **Atualização não bloqueante:** um processo auxiliar e temporário executa
+  até cinco requisições HTTPS com `curl` (limites de 4 s para conexão e 8 s por
+  requisição). O processo é encerrado ao sair; não há daemon nem polling
+  permanente. A interface continua utilizável se a rede estiver lenta.
+- **Armazenamento:** `mercado.tsv` é salvo separadamente em
+  `~/.local/share/invest/` (ou `$XDG_DATA_HOME/invest/`). O arquivo usa
+  substituição atômica e backup `.bak` da última versão válida.
+- **Privacidade:** as consultas envolvem apenas endereços HTTPS fixos de
+  fornecedores públicos, sem transmitir seus cenários ou orçamento.
+
+Requer o executável `curl` **apenas para atualizar** os indicadores; o
+restante do programa e a consulta dos valores salvos funcionam sem ele.
+Não há nova biblioteca C obrigatória. Os valores de criptomoedas podem ser
+abreviados na barra lateral para caber em 1280×800.
+
+
 
 ## Novidades v0.3.11 — segurança e estabilidade
 
@@ -55,7 +89,8 @@ não representa necessariamente o estado mais recente se houver corrupção.
 - Tela **Simulador** mais compacta: gráfico e resultados cabem em um monitor de
   1280×800 (ThinkPad X200), sem perder a taxa equivalente anual.
 - Renderização **sob demanda**: o loop X11 usa `XNextEvent()` (bloqueia quando
-  ocioso, sem polling/timer), e `Expose` copia somente a região afetada do
+  ocioso; apenas durante consultas assíncronas verifica periodicamente
+  a conclusão do processo temporário), e `Expose` copia somente a região afetada do
   pixmap de backbuffer já pronto, sem repetir a construção da tela.
 - **Cache do gráfico anual**: os arquivos de 12 meses são lidos uma vez quando
   necessário, em vez de relidos a cada repintura. O cache é invalidado ao
@@ -89,7 +124,7 @@ apagar ou converter seus dados**.
 O Void separa a biblioteca Cairo dos cabeçalhos de desenvolvimento:
 
 ```sh
-sudo xbps-install -S gcc make pkg-config cairo-devel libX11-devel
+sudo xbps-install -S gcc make pkg-config cairo-devel libX11-devel curl
 ```
 
 Dentro da pasta do projeto:
@@ -121,6 +156,7 @@ Por padrão, são mantidos em `~/.local/share/invest/` (ou
 `$XDG_DATA_HOME/invest/`):
 
 - `cenarios.tsv`: investimentos simulados e eventos.
+- `mercado.tsv`: último conjunto conhecido de indicadores, hora da consulta e data da fonte; não contém seus investimentos.
 - `orcamento.tsv`: dados legados de orçamento, mantidos.
 - `meses/AAAA-MM.tsv`: planejado e realizado de cada mês.
 - `cenarios.tsv.bak`, `orcamento.tsv.bak` e `meses/AAAA-MM.tsv.bak`:
@@ -150,11 +186,12 @@ ps -C invest -o pid,rss,%cpu,etime,comm
 ```
 
 O desenho final é feito em uma superfície Cairo vinculada a um pixmap X11,
-sem renderização contínua, serviços em segundo plano ou requisições de rede.
+sem renderização contínua ou serviços residentes. Consultas de mercado são
+feitas somente durante a atualização pontual, em um processo separado.
 
 ## Testes
 
-`make test` cobre fórmulas financeiras, regras temporárias, orçamentos,
+`make test` cobre parsing e cache dos indicadores, fórmulas financeiras, regras temporárias, orçamentos,
 migração de arquivos, UTF-8, acentos, Backspace, armazenamento por mês e
 recuperação de arquivos danificados em três formatos.
 Foi realizado também um teste gráfico com Expose, as quatro abas e
@@ -171,3 +208,13 @@ Licença MIT. Consulte `LICENSE`.
   Para proteção contra falhas de hardware, mantenha cópias externas.
 - A função de recuperação é um utilitário de terminal nesta versão. Uma tela
   gráfica de recuperação poderá ser considerada numa atualização posterior.
+
+## Validação de API e limites
+
+Os testes automatizados utilizam respostas JSON de exemplo para verificar
+campos, limites e erros sem depender da internet. O fluxo completo de
+atualização, gravação e reabertura foi testado com respostas simuladas
+(`curl` de teste). A disponibilidade real das APIs pode mudar.
+A compilação de integração no ambiente de desenvolvimento utilizou os
+headers de compatibilidade do Cairo disponíveis ali; recomenda-se compilar
+no Void com `cairo-devel` oficial e executar `make test`.

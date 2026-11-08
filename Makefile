@@ -6,7 +6,7 @@ CPPFLAGS = -Isrc
 CAIRO_CFLAGS = $(shell pkg-config --cflags cairo)
 CAIRO_LIBS = $(shell pkg-config --libs cairo)
 LDLIBS = -lX11 $(CAIRO_LIBS) -lm
-SRC = src/main.c src/finance.c src/storage.c src/budget.c src/utf8.c src/compose.c src/monthly.c src/safeio.c src/lock.c
+SRC = src/main.c src/finance.c src/storage.c src/budget.c src/utf8.c src/compose.c src/monthly.c src/safeio.c src/lock.c src/market.c
 OBJ = $(SRC:.c=.o)
 
 all: invest invest-doctor
@@ -20,7 +20,7 @@ invest-doctor: $(DOCTOR_SRC) src/safeio.h
 invest: $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
-src/main.o: src/main.c src/lock.h src/finance.h src/storage.h src/budget.h src/monthly.h src/utf8.h src/compose.h
+src/main.o: src/main.c src/lock.h src/finance.h src/storage.h src/budget.h src/monthly.h src/utf8.h src/compose.h src/market.h
 	@pkg-config --exists cairo || { echo 'Falta cairo-devel (Void Linux: sudo xbps-install -S cairo-devel pkg-config)' >&2; exit 1; }
 	$(CC) $(CPPFLAGS) $(CAIRO_CFLAGS) $(CFLAGS) -c -o $@ $<
 
@@ -32,11 +32,14 @@ src/compose.o: src/compose.c src/compose.h src/utf8.h
 src/monthly.o: src/monthly.c src/monthly.h src/budget.h src/utf8.h src/safeio.h
 src/safeio.o: src/safeio.c src/safeio.h
 src/lock.o: src/lock.c src/lock.h src/storage.h
+src/market.o: src/market.c src/market.h src/storage.h src/safeio.h
 
 .c.o:
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 test:
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-market tests/test_market.c src/market.c src/storage.c src/finance.c src/utf8.c src/safeio.c -lm
+	./test-market
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-finance tests/test_finance.c src/finance.c -lm
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-storage tests/test_storage.c src/finance.c src/storage.c src/utf8.c src/safeio.c -lm
 	./test-finance
@@ -53,7 +56,7 @@ test:
 	./test-recovery
 
 clean:
-	rm -f invest invest-doctor $(OBJ) test-finance test-storage test-budget test-utf8 test-compose test-monthly test-recovery
+	rm -f invest invest-doctor $(OBJ) test-finance test-storage test-budget test-utf8 test-compose test-monthly test-recovery test-market
 
 PREFIX = /usr/local
 install: invest invest-doctor

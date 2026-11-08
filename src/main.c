@@ -7,6 +7,7 @@
 #include <time.h>
 #include "utf8.h"
 #include "compose.h"
+#include "market.h"
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -19,10 +20,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <sys/select.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <unistd.h>
 
-/* invest v0.3.11: Dark Elegant + renderizacao orientada a eventos.
+/* invest v0.3.12: indicadores sob demanda, sem bloquear X11.
  * C11, Xlib e Cairo. Sem GTK, Qt, browser, timers ou polling. */
-#define APP_TITLE "invest 0.3.11"
+#define APP_TITLE "invest 0.3.12"
 #define SIDE 242
 #define MAX_CLICKS 240
 #define MAX_EDIT 128
@@ -48,7 +54,7 @@ typedef enum {
     A_BUDGET_INCOME, A_BUDGET_EXPENSE, A_BUDGET_NEW, A_BUDGET_EDIT, A_BUDGET_DELETE,
     A_BUDGET_CATEGORY, A_BUDGET_FIXED, A_BUDGET_VARIABLE, A_BUDGET_SAVE, A_BUDGET_CANCEL,
     A_BUDGET_PREV, A_BUDGET_NEXT, A_INVESTMENT_EDIT, A_INVESTMENT_SAVE, A_INVESTMENT_CANCEL,
-    A_MONTH_PREV, A_MONTH_NEXT, A_MONTH_PLAN, A_MONTH_ACTUAL, A_MONTH_COPY, A_MONTH_YEAR, A_MONTH_CHART
+    A_MONTH_PREV, A_MONTH_NEXT, A_MONTH_PLAN, A_MONTH_ACTUAL, A_MONTH_COPY, A_MONTH_YEAR, A_MONTH_CHART, A_MARKET_REFRESH
 } Action;
 typedef enum { CONFIRM_SCENARIO, CONFIRM_EVENT, CONFIRM_BUDGET } ConfirmKind;
 
@@ -89,6 +95,10 @@ typedef struct {
     int event_limited; /* 0 = ate o fim; 1 = por N meses */
     int event_scroll;
     int sidebar_scroll;
+    MarketData market;
+    pid_t market_pid;
+    time_t market_attempt;
+    int market_error;
     int cmp_a,cmp_b;
     int plot_hover;
     Field focus;
@@ -645,7 +655,7 @@ static void scenario_remove(void){
     app.cmp_a=0;app.cmp_b=app.store.count>1?1:0;
     modified();status("Cenario excluido.",0);
 }
-static int list_visible(void){return imax(1,(app.h-142-145)/62);}
+static int list_visible(void){return imax(1,(app.h-142-395)/62);}
 static void clamp_list(void){
     int max=imax(0,app.store.count-list_visible());
     if(app.sidebar_scroll>max)app.sidebar_scroll=max;
@@ -664,13 +674,84 @@ static void draw_header(void){
     Rect savebtn={app.w-159,18,132,38};
     fill((Rect){0,0,app.w,74},SIDE_BG);
     txt(22,46,"invest.",INK,app.f_title);
-    txt(114,42,"v0.3.11",SIDE_TEXT,app.f_small);
+    txt(114,42,"v0.3.12",SIDE_TEXT,app.f_small);
     header_tab((Rect){251,17,114,39},"SIMULADOR",app.view==SIMULATE,A_SCREEN_SIM);
     header_tab((Rect){374,17,96,39},"EVENTOS",app.view==EVENTS,A_SCREEN_EVENTS);
     header_tab((Rect){479,17,112,39},"COMPARAR",app.view==COMPARE,A_SCREEN_COMPARE);
     header_tab((Rect){600,17,115,39},"FINANÇAS",app.view==FINANCES,A_SCREEN_FINANCES);
     button(savebtn,app.dirty||app.budget_dirty?"Salvar agora":"Salvar",1,A_SAVE,0);
 }
+
+/* Mercado ocupa um canto fixo da lateral. Nenhuma chamada de rede durante
+ * desenho; somente cache em RAM, inclusive no modo offline. */
+static void market_text(const MarketQuote *q,int idx,char*out,size_t cap){
+    if(!q->valid){snprintf(out,cap,"--");return;}
+    double v=q->value;
+    if(idx==MARKET_SELIC){snprintf(out,cap,"%.2f%% a.a.",v);}
+    else if(idx==MARKET_USD||idx==MARKET_EUR){snprintf(out,cap,"R$ %.4f",v);}
+    else if(v>=1000000){snprintf(out,cap,"R$ %.2f mi",v/1000000.0);}
+    else if(v>=100000){snprintf(out,cap,"R$ %.1f mil",v/1000.0);}
+    else if(v>=10000){snprintf(out,cap,"R$ %.0f",v);}
+    else {snprintf(out,cap,"R$ %.2f",v);}
+    for(size_t i=0;out[i];i++)if(out[i]=='.')out[i]=',';
+}
+static void draw_market(void){
+    static const char* names[MARKET_COUNT]={"Selic-meta", "Dólar PTAX", "Euro PTAX", "Bitcoin", "Monero"};
+    int y=app.h-296;char val[80],st[120];
+    line(18,y-8,SIDE-18,y-8,SIDE_ACTIVE);
+    txt(22,y+17,"MERCADO",SIDE_TEXT,app.f_bold);
+    for(int i=0;i<MARKET_COUNT;i++){
+        int yy=y+49+i*34;
+        txt(23,yy,names[i],SIDE_TEXT,app.f_small);
+        market_text(&app.market.items[i],i,val,sizeof(val));
+        text_right(SIDE-19,yy,val,app.market.items[i].valid?INK:MUTED,app.f_small);
+    }
+    if(app.market_pid>0){snprintf(st,sizeof(st),"Atualizando cotações...");}
+    else if(app.market_error){snprintf(st,sizeof(st),"Sem conexão ou fonte indisponível");}
+    else {
+        time_t stamp=market_latest(&app.market),now=time(NULL);
+        if(stamp){
+            struct tm local;
+            if(localtime_r(&stamp,&local)){
+                char when[32];strftime(when,sizeof(when),"%d/%m %H:%M",&local);
+                snprintf(st,sizeof(st),"Última consulta: %s%s",when,(now-stamp>900)?" (cache)":"");
+            }else snprintf(st,sizeof(st),"Dados salvos localmente");
+        }else snprintf(st,sizeof(st),"Cotações ainda não consultadas");
+    }
+    cut_text(val,sizeof(val),st,SIDE-42,app.f_small);
+    txt(22,y+234,val,SIDE_TEXT,app.f_small);
+    Rect button_area={18,y+245,SIDE-36,31};
+    button(button_area,app.market_pid>0?"Atualizando...":"Atualizar mercado",0,A_MARKET_REFRESH,0);
+}
+static void market_start(void){
+    if(app.market_pid>0)return;
+    time_t now=time(NULL);
+    if(app.market_attempt && now-app.market_attempt<30){status("Aguarde alguns segundos antes de atualizar novamente.",1);return;}
+    pid_t child=fork();
+    if(child<0){app.market_error=1;status("Não foi possível iniciar a atualização.",1);return;}
+    if(child==0){
+        /* Isola rede e parsing do processo de interface. Nunca toca no X11. */
+        int result=market_refresh();
+        _exit(result==0?0:1);
+    }
+    app.market_pid=child;app.market_attempt=now;app.market_error=0;
+}
+static void paint(void);
+static void market_poll(void){
+    if(app.market_pid<=0)return;
+    int code=0;pid_t done=waitpid(app.market_pid,&code,WNOHANG);
+    if(done==0)return;
+    if(done<0){app.market_error=1;app.market_pid=0;paint();return;}
+    app.market_pid=0;
+    MarketData next;
+    if(market_load(&next)==0)app.market=next;
+    if(!WIFEXITED(code)||WEXITSTATUS(code)!=0){
+        app.market_error=1;
+        status("Não foi possível obter todas as cotações. Valores salvos preservados.",1);
+    }else status("Indicadores econômicos atualizados.",0);
+    paint();
+}
+
 static void draw_side(void){
     int y,i,visible;
     if(app.view==FINANCES){
@@ -690,14 +771,10 @@ static void draw_side(void){
         txt(23,329,"Reservado para investir",SIDE_TEXT,app.f_small);
         money(t.monthly_investment,text,sizeof(text));txt(23,358,text,INK,app.f_bold);
         line(22,382,SIDE-22,382,SIDE_ACTIVE);
-        txt(23,414,"SALDO DISPONIVEL",SIDE_TEXT,app.f_small);
+        txt(23,392,"SALDO DISPONIVEL",SIDE_TEXT,app.f_small);
         money(t.balance,text,sizeof(text));
-        txt(23,444,text,t.balance>=0?INK:RED,app.f_bold);
-        txt(23,512,"Orçamento mensal",SIDE_TEXT,app.f_small);
-        txt(23,533,"sem conexão bancária.",SIDE_TEXT,app.f_small);
-        txt(23,567,"Reserva sem vinculação",SIDE_TEXT,app.f_small);
-        txt(23,588,"a ativos do simulador.",SIDE_TEXT,app.f_small);
-        txt(22,app.h-18,"Dados locais  |  Linux",SIDE_TEXT,app.f_small);
+        txt(23,418,text,t.balance>=0?INK:RED,app.f_bold);
+        draw_market();
         return;
     }
     fill((Rect){0,74,SIDE,app.h-74},SIDE_BG);
@@ -718,13 +795,13 @@ static void draw_side(void){
         txt(r.x+13,r.y+43,sub,SIDE_TEXT,app.f_small);
         add_hit(r,A_CHOOSE,n);
     }
-    y=app.h-87;
+    y=app.h-350;
     if(app.store.count>visible){
         button((Rect){23,y-41,87,29},"Anterior",0,A_LIST_PREV,0);
         button((Rect){132,y-41,87,29},"Proximo",0,A_LIST_NEXT,0);
     }
     button((Rect){18,y,SIDE-36,39},"+ Novo cenário",1,A_NEW,0);
-    txt(22,app.h-18,"Dados locais  |  Linux",SIDE_TEXT,app.f_small);
+    draw_market();
 }
 static void draw_footer(void){
     fill((Rect){SIDE,app.h-36,app.w-SIDE,36},BG);
@@ -1314,6 +1391,7 @@ static void execute(Action a,int arg){
     case A_MONTH_COPY:month_copy_previous();break;
     case A_MONTH_YEAR:app.year_view=!app.year_view;break;
     case A_MONTH_CHART:app.chart_metric=(app.chart_metric+1)%4;break;
+    case A_MARKET_REFRESH:market_start();break;
     case A_NEW:scenario_new(0);break;
     case A_DUPLICATE:scenario_new(1);break;
     case A_DELETE:if(app.store.count>1){app.confirm=CONFIRM_SCENARIO;app.modal=MODAL_CONFIRM;}else status("Mantenha pelo menos um cenário.",1);break;
@@ -1368,7 +1446,7 @@ static void mouse_press(int x,int y,unsigned button){
             app.event_scroll=imax(0,app.event_scroll+(button==4?-1:1));
         }else if(app.modal==MODAL_NONE&&app.view==FINANCES && inside(x,y,budget_list_box())){
             app.budget_scroll=imax(0,app.budget_scroll+(button==4?-1:1));
-        }else if(app.modal==MODAL_NONE&&app.view!=FINANCES&&inside(x,y,(Rect){0,130,SIDE,app.h-130})){
+        }else if(app.modal==MODAL_NONE&&app.view!=FINANCES&&inside(x,y,(Rect){0,130,SIDE,app.h-445})){
             app.sidebar_scroll=imax(0,app.sidebar_scroll+(button==4?-1:1));clamp_list();
         }return;
     }
@@ -1614,9 +1692,29 @@ int main(void){
     }
     if(!app.store.count){scenario_default(&app.store.items[0]);app.store.count=1;app.store.selected=0;app.dirty=1;}
     app.cmp_a=0;app.cmp_b=app.store.count>1?1:0;
+    if(market_load(&app.market)<0){
+        memset(&app.market,0,sizeof(app.market));
+        app.market_error=1;
+    }
     app.running=1;
     if(setup()<0){if(app.dpy)shutdown();return EXIT_FAILURE;}
+    {
+        time_t now=time(NULL),last=market_latest(&app.market);
+        if(!last || now-last>900)market_start();
+    }
+    paint();
     while(app.running){
+        if(app.market_pid>0){
+            /* Half-second timeout only while fetching; fully idle otherwise. */
+            if(!XPending(app.dpy)){
+                fd_set rfd;struct timeval timeout={0,500000};int fd=ConnectionNumber(app.dpy);
+                FD_ZERO(&rfd);FD_SET(fd,&rfd);
+                (void)select(fd+1,&rfd,NULL,NULL,&timeout);
+            }
+            market_poll();
+            if(!app.running)break;
+            if(!XPending(app.dpy))continue;
+        }
         XNextEvent(app.dpy,&ev);
         if(ev.type==KeyPress){
             /* Teclas mortas podem ser filtradas pelo XIM antes de handle_key.
@@ -1660,5 +1758,6 @@ int main(void){
         default:break;
         }
     }
+    if(app.market_pid>0){kill(app.market_pid,SIGTERM);(void)waitpid(app.market_pid,NULL,0);}
     shutdown();invest_lock_release();return EXIT_SUCCESS;
 }

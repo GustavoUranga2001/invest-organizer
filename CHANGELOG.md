@@ -1,5 +1,15 @@
 # Histórico de versões
 
+## 0.3.12 — Indicadores de mercado
+
+- Selic-meta, PTAX USD/BRL e EUR/BRL, BTC/BRL e XMR/BRL na lateral.
+- Atualização pontual por HTTPS via `curl`, em processo separado, sem bloquear a janela.
+- Cache offline em `mercado.tsv`, com timestamps por indicador e backups.
+- Leitura de JSON restrita às chaves necessárias; rejeição de valores inválidos.
+- Testes de parsing, arquivo inválido e atualização completa simulada.
+- Interface Dark Elegant e os dados/cálculos financeiros permanecem intactos.
+
+
 ## 0.3.11 — Estabilidade e proteção dos dados
 
 - Escrita atômica e sincronização de disco em cenários, orçamento e meses.
