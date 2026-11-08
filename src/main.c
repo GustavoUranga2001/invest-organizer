@@ -26,9 +26,9 @@
 #include <signal.h>
 #include <unistd.h>
 
-/* invest v0.3.12: indicadores sob demanda, sem bloquear X11.
+/* invest v0.3.14: indicadores sob demanda, sem bloquear X11.
  * C11, Xlib e Cairo. Sem GTK, Qt, browser, timers ou polling. */
-#define APP_TITLE "invest 0.3.12"
+#define APP_TITLE "invest 0.3.14"
 #define SIDE 242
 #define MAX_CLICKS 240
 #define MAX_EDIT 128
@@ -674,7 +674,7 @@ static void draw_header(void){
     Rect savebtn={app.w-159,18,132,38};
     fill((Rect){0,0,app.w,74},SIDE_BG);
     txt(22,46,"invest.",INK,app.f_title);
-    txt(114,42,"v0.3.12",SIDE_TEXT,app.f_small);
+    txt(114,42,"v0.3.14",SIDE_TEXT,app.f_small);
     header_tab((Rect){251,17,114,39},"SIMULADOR",app.view==SIMULATE,A_SCREEN_SIM);
     header_tab((Rect){374,17,96,39},"EVENTOS",app.view==EVENTS,A_SCREEN_EVENTS);
     header_tab((Rect){479,17,112,39},"COMPARAR",app.view==COMPARE,A_SCREEN_COMPARE);
@@ -707,7 +707,11 @@ static void draw_market(void){
         text_right(SIDE-19,yy,val,app.market.items[i].valid?INK:MUTED,app.f_small);
     }
     if(app.market_pid>0){snprintf(st,sizeof(st),"Atualizando cotações...");}
-    else if(app.market_error){snprintf(st,sizeof(st),"Sem conexão ou fonte indisponível");}
+    else if(app.market_error){
+        MarketDiagnostics diag;
+        if(market_diagnostics_load(&diag)==0)market_diagnostics_summary(&diag,st,sizeof(st));
+        else snprintf(st,sizeof(st),"Falha no mercado; execute invest-market-check");
+    }
     else {
         time_t stamp=market_latest(&app.market),now=time(NULL);
         if(stamp){
@@ -745,10 +749,18 @@ static void market_poll(void){
     app.market_pid=0;
     MarketData next;
     if(market_load(&next)==0)app.market=next;
-    if(!WIFEXITED(code)||WEXITSTATUS(code)!=0){
-        app.market_error=1;
-        status("Não foi possível obter todas as cotações. Valores salvos preservados.",1);
-    }else status("Indicadores econômicos atualizados.",0);
+    {
+        MarketDiagnostics diag;
+        if(market_diagnostics_load(&diag)==0){
+            char message[180];
+            market_diagnostics_summary(&diag,message,sizeof(message));
+            app.market_error=(diag.updated<MARKET_COUNT);
+            status(message,app.market_error);
+        }else if(!WIFEXITED(code)||WEXITSTATUS(code)!=0){
+            app.market_error=1;
+            status("Falha na atualização; execute invest-market-check.",1);
+        }else status("Indicadores econômicos atualizados.",0);
+    }
     paint();
 }
 

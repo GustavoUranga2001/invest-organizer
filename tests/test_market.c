@@ -18,10 +18,24 @@ int main(void){
     assert(market_parse_ptax("{\"value\":[{\"cotacaoCompra\":5.001,\"cotacaoVenda\":5.0123,\"dataHoraCotacao\":\"2026-11-06 13:10:10.000\"}]}",&v,date,sizeof(date))==0);
     assert(close_enough(v,5.0123));assert(!strcmp(date,"2026-11-06 13:10:10.000"));
     assert(market_parse_ptax("{\"value\":[]}",&v,date,sizeof(date))<0);
-    assert(market_parse_crypto("{\"quotes\":{\"USD\":{\"price\":100.5},\"BRL\":{\"price\":550.25}},\"last_updated\":\"2026-11-08T12:00:00Z\"}",&v,date,sizeof(date))==0);
-    assert(close_enough(v,550.25));assert(!strcmp(date,"2026-11-08T12:00:00Z"));
-    assert(market_parse_crypto("{\"quotes\":{\"USD\":{\"price\":100.5}}}",&v,date,sizeof(date))<0);
-    assert(market_parse_crypto("{\"quotes\":{\"BRL\":{\"price\":-1}}}",&v,date,sizeof(date))<0);
+    const char *rates=
+      "Market Cap: $2,500,000,000,000\n"
+      "│ Rank │ Coin │ Price (USD) │ Change (24H) │\n"
+      "│ 1    │ BTC  │ 75683.0     │ -0.10%       │\n"
+      "│ 2    │ ETH  │ 2227.62     │  0.00%       │\n"
+      "│ 11   │ XMR  │ 599.125     │ +2.00%       │\n"
+      "2026-11-08 17:52:09 UTC\n";
+    assert(market_parse_rate_sx_brl(rates,"BTC",&v)<0);
+    assert(market_parse_rate_sx_brl("│ Rank │ Coin │ Price (BRL) │\n│ 1 │ BTC │ 420000.50 │\n","BTC",&v)==0 && close_enough(v,420000.5));
+    assert(market_parse_rate_sx(rates,"BTC",&v)==0 && close_enough(v,75683));
+    assert(market_parse_rate_sx(rates,"XMR",&v)==0 && close_enough(v,599.125));
+    assert(market_parse_rate_sx(rates,"ADA",&v)<0);
+    assert(market_parse_rate_sx("<html>error</html>","BTC",&v)<0);
+    assert(market_parse_rate_sx("│ Rank │ Coin │ Price (BRL) │\n│ 1 │ BTC │ 250000 │\n","BTC",&v)<0);
+    assert(market_parse_rate_sx("│ Rank │ Coin │ Price (USD) │\n│ 1 │ BTC │ -1 │\n","BTC",&v)<0);
+    assert(market_parse_rate_sx("│ Rank │ Coin │ Price (USD) │\n│ 1 │ BTC │ NaN │\n","BTC",&v)<0);
+    assert(market_parse_rate_sx("│ Rank │ Coin │ Price (USD) │\n│ 1 │ BTC │ 2%;bad │\n","BTC",&v)<0);
+    assert(market_parse_rate_sx("| Rank | Coin | Price (USD) |\n| 2 | XMR | 555.5 |\n","XMR",&v)==0 && close_enough(v,555.5));
     char tmp[]="/tmp/invest-market-tests-XXXXXX";assert(mkdtemp(tmp));
     assert(setenv("XDG_DATA_HOME",tmp,1)==0);
     MarketData m;assert(market_load(&m)==1);assert(!market_latest(&m));

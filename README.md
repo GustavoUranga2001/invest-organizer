@@ -1,8 +1,66 @@
-# invest v0.3.12 — Dark Elegant / Indicadores econômicos
+# invest v0.3.14 — BTC e Monero pelo rate.sx
 
 Simulador de investimentos e organizador de finanças pessoais, **nativo para Linux**.
 Construído em C11 + Xlib + Cairo, sem GTK, Qt, Electron, navegador, banco de dados,
 telemetria ou conexão obrigatória à internet.
+
+## Novo na v0.3.14 — migração de BTC/XMR para rate.sx
+
+- Removida a dependência da CoinPaprika para BTC e XMR.
+- Prioriza uma única consulta à tabela `brl.rate.sx` para cotação direta em reais; exige o cabeçalho `Price (BRL)` para evitar confusão de moedas.
+- Se indisponível, consulta `rate.sx` em USD e converte usando a PTAX USD/BRL **da mesma atualização**.
+- Cache, backups, funcionamento offline e diagnóstico de falhas preservados.
+- Não é necessário migrar nem excluir `mercado.tsv`. As cotações antigas podem continuar no cache até uma atualização bem-sucedida.
+- Para conferir as saídas no Void Linux: `curl -fsSL 'https://brl.rate.sx/?qT&n=80'` e `curl -fsSL 'https://rate.sx/?qT&n=80'`.
+- O site não fornece aqui uma API JSON estável. Se mudar o formato da tabela ou a posição da moeda fora das primeiras 80 listadas, o diagnóstico mostrará erro de resposta e manterá os valores antigos.
+
+## Novo na v0.3.13 — diagnóstico de atualização de mercado
+
+Na v0.3.12, qualquer falha da API produzia o mesmo aviso genérico,
+mesmo que a internet estivesse funcionando. Isso incluía DNS, certificado
+HTTPS, respostas HTTP (como 403/429), tempo limite e mudanças no JSON.
+
+A v0.3.13 diferencia essas situações e guarda um diagnóstico simples em
+`~/.local/share/invest/mercado-estado.tsv`. **Não apague sua pasta de dados.**
+A interface mostra a causa resumida no rodapé; para identificar o erro de
+cada fonte, feche o invest e execute:
+
+```sh
+./invest-market-check
+```
+
+O comando tenta atualizar os indicadores e imprime o resultado de cada um.
+Ele preserva os valores antigos quando uma fonte falha. Retorna sucesso se
+pelo menos um preço novo foi salvo; um indicador que falhou continua com a
+última cotação válida e não recebe dados inventados.
+
+Exemplos de mensagens:
+- `curl não instalado/não encontrado no PATH`: instale `curl`.
+- `DNS: servidor não encontrado`: confira a resolução de DNS para a API.
+- `certificado/TLS HTTPS`: verifique certificados e relógio do sistema.
+- `HTTP: API recusou a consulta`: o serviço pode estar indisponível ou
+  bloqueando requisições, mesmo com conexão à internet.
+- `resposta inesperada do fornecedor`: o fornecedor alterou o formato ou retornou
+  um erro inesperado. Envie a saída do diagnóstico para investigar.
+
+Para o **Void Linux**:
+
+```sh
+sudo xbps-install -S curl ca-certificates gcc make pkg-config cairo-devel libX11-devel
+make clean
+make
+make test
+./invest-market-check
+./invest
+```
+
+Não use `curl -k`/`--insecure` como solução: a verificação de certificados
+HTTPS deve permanecer habilitada.
+
+**Validação:** tests com cinco respostas simuladas, falha de DNS, recusa HTTP
+e atualização parcial; interface aberta em X11 virtual a 1280×800. A execução
+das APIs públicas reais não pôde ser validada no ambiente sem acesso externo;
+a resposta na sua instalação Void será a confirmação decisiva.
 
 ## Novo na v0.3.12 — Mercado na barra lateral
 
@@ -16,13 +74,12 @@ dados estejam ausentes ou a última consulta tenha mais de 15 minutos.
 - **Banco Central (PTAX/OData):** valor de venda do último boletim disponível
   para USD e EUR. É uma cotação de referência, não um preço de compra e venda
   em bancos ou corretoras, nem cotação de mercado em tempo real.
-- **CoinPaprika (API de tickers):** preços indicativos agregados em BRL
-  de BTC e XMR. A API tem limites, termos de uso e pode ficar indisponível.
+- **rate.sx:** cotações indicativas BTC e XMR obtidas da tabela de texto `https://brl.rate.sx/?qT&n=80`, desde que identifique explicitamente `Price (BRL)`. Se essa opção falhar, consulta `https://rate.sx/?qT&n=80` em USD e converte pela PTAX de venda USD/BRL da mesma atualização. Sem resposta BRL válida ou PTAX atual, mantém o último cache. A PTAX é uma referência de mercado e não uma taxa de câmbio em tempo real; os valores em BRL são aproximados. O serviço tem seus próprios limites e pode mudar a formatação.
 - **Cotações são informativas:** não afetam cálculos, orçamento nem criam
   operações financeiras automaticamente. Nenhum valor é inventado quando a
   consulta falha: é exibido `--` ou o último valor local com data da consulta.
 - **Atualização não bloqueante:** um processo auxiliar e temporário executa
-  até cinco requisições HTTPS com `curl` (limites de 4 s para conexão e 8 s por
+  até cinco requisições HTTPS com `curl` (limites de 6 s para conexão e 12 s por
   requisição). O processo é encerrado ao sair; não há daemon nem polling
   permanente. A interface continua utilizável se a rede estiver lenta.
 - **Armazenamento:** `mercado.tsv` é salvo separadamente em

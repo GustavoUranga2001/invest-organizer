@@ -9,12 +9,15 @@ LDLIBS = -lX11 $(CAIRO_LIBS) -lm
 SRC = src/main.c src/finance.c src/storage.c src/budget.c src/utf8.c src/compose.c src/monthly.c src/safeio.c src/lock.c src/market.c
 OBJ = $(SRC:.c=.o)
 
-all: invest invest-doctor
+all: invest invest-doctor invest-market-check
 
 DOCTOR_SRC = src/doctor.c src/finance.c src/storage.c src/budget.c src/monthly.c src/utf8.c src/safeio.c src/lock.c
 
 invest-doctor: $(DOCTOR_SRC) src/safeio.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(DOCTOR_SRC) -lm
+
+invest-market-check: src/market_check.c src/market.c src/storage.c src/finance.c src/utf8.c src/safeio.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ -lm
 
 # Compilacao incremental: so os modulos alterados sao recompilados.
 invest: $(OBJ)
@@ -37,9 +40,10 @@ src/market.o: src/market.c src/market.h src/storage.h src/safeio.h
 .c.o:
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-test:
+test: invest-market-check
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-market tests/test_market.c src/market.c src/storage.c src/finance.c src/utf8.c src/safeio.c -lm
 	./test-market
+	./tests/test_market_network.sh
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-finance tests/test_finance.c src/finance.c -lm
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o test-storage tests/test_storage.c src/finance.c src/storage.c src/utf8.c src/safeio.c -lm
 	./test-finance
@@ -56,16 +60,17 @@ test:
 	./test-recovery
 
 clean:
-	rm -f invest invest-doctor $(OBJ) test-finance test-storage test-budget test-utf8 test-compose test-monthly test-recovery test-market
+	rm -f invest invest-doctor invest-market-check $(OBJ) test-finance test-storage test-budget test-utf8 test-compose test-monthly test-recovery test-market
 
 PREFIX = /usr/local
-install: invest invest-doctor
+install: invest invest-doctor invest-market-check invest-market-check
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 invest $(DESTDIR)$(PREFIX)/bin/invest
 	install -m 755 invest-doctor $(DESTDIR)$(PREFIX)/bin/invest-doctor
+	install -m 755 invest-market-check $(DESTDIR)$(PREFIX)/bin/invest-market-check
 	install -d $(DESTDIR)$(PREFIX)/share/applications
 	install -m 644 invest.desktop $(DESTDIR)$(PREFIX)/share/applications/invest.desktop
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/invest $(DESTDIR)$(PREFIX)/bin/invest-doctor
+	rm -f $(DESTDIR)$(PREFIX)/bin/invest $(DESTDIR)$(PREFIX)/bin/invest-doctor $(DESTDIR)$(PREFIX)/bin/invest-market-check
 	rm -f $(DESTDIR)$(PREFIX)/share/applications/invest.desktop

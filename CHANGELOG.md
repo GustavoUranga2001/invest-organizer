@@ -1,3 +1,26 @@
+# Histórico de mudanças
+
+## v0.3.14 — rate.sx para BTC e XMR
+
+- Fonte de BTC e Monero alterada para `rate.sx` (tabela de texto, sem JSON).
+- Preferência por `brl.rate.sx`, com validação explícita da moeda BRL.
+- Alternativa: tabela USD do `rate.sx` multiplicada pela PTAX USD/BRL consultada na mesma atualização.
+- Uma única consulta fornece ambas as criptomoedas em cada tentativa.
+- Nenhum dado estimado é gravado se a moeda não puder ser identificada corretamente.
+- Cache offline, backups, atualização parcial e as quatro abas preservados.
+
+
+## v0.3.13 — diagnóstico do módulo Mercado
+
+- Identifica separadamente: falta de `curl`, erros de DNS, falhas TLS,
+  erros HTTP, limites de tempo, conexão e incompatibilidade de JSON.
+- Exibe um resumo no rodapé da GUI em vez do aviso genérico.
+- Adiciona o executável `invest-market-check` para diagnosticar cada fonte.
+- Preserva as cotações salvas e aplica atualizações parciais.
+- Persiste apenas o diagnóstico da última tentativa, sem dados privados.
+- Acrescenta testes de integração com falhas simuladas de DNS e HTTP.
+- Mantém dados, visual, quatro abas, orçamento e fórmulas da v0.3.12.
+
 # Histórico de versões
 
 ## 0.3.12 — Indicadores de mercado
