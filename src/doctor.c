@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "budget.h"
 #include "monthly.h"
+#include "goals.h"
 #include "safeio.h"
 #include "storage.h"
 #include "lock.h"
@@ -75,7 +76,7 @@ static int valid_month_filename(const char *name, int *year, int *month) {
 
 int main(int argc, char **argv) {
     int recover;
-    char scenarios[PATH_MAX], budget[PATH_MAX], directory[PATH_MAX];
+    char scenarios[PATH_MAX], budget[PATH_MAX], goals[PATH_MAX], directory[PATH_MAX];
     DIR *d;struct dirent *entry;
     if (argc != 2 || (strcmp(argv[1], "check") && strcmp(argv[1], "recover"))) {
         fprintf(stderr, "Uso: invest-doctor check | recover\n"
@@ -92,12 +93,14 @@ int main(int argc, char **argv) {
         }
     }
     if (storage_path(scenarios, sizeof(scenarios)) != 0 ||
-        budget_path(budget, sizeof(budget)) != 0) {
+        budget_path(budget, sizeof(budget)) != 0 ||
+        goals_path(goals, sizeof(goals)) != 0) {
         fprintf(stderr, "HOME ou XDG_DATA_HOME inválido\n");return 2;
     }
     printf("Diagnóstico do invest (%s)\n", recover ? "recuperação explícita" : "somente leitura");
     check_target("Cenários", scenarios, storage_validate_file, NULL, recover);
     check_target("Orçamento legado", budget, budget_validate_file, NULL, recover);
+    check_target("Metas financeiras", goals, goals_validate_file, NULL, recover);
     {
         char *slash;
         if (snprintf(directory, sizeof(directory), "%s", budget) >= (int)sizeof(directory)) return 2;

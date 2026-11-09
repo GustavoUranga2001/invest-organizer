@@ -1,8 +1,77 @@
-# invest v0.3.14 — BTC e Monero pelo rate.sx
+# invest v0.3.15 — Metas financeiras integradas
 
 Simulador de investimentos e organizador de finanças pessoais, **nativo para Linux**.
 Construído em C11 + Xlib + Cairo, sem GTK, Qt, Electron, navegador, banco de dados,
 telemetria ou conexão obrigatória à internet.
+
+## Novo na v0.3.15 — Metas integradas à aba Finanças
+
+Uma quinta aba, **METAS**, permite definir objetivos, acompanhar progresso
+acumulado e classificar uma parte dos investimentos **efetivamente realizados**
+em cada mês. O visual Dark Elegant e as outras quatro abas não foram alterados.
+
+### Como usar
+
+1. Abra **Finanças**, selecione o mês e entre na visão **Realizado**.
+2. Clique em **Definir valor**, informe quanto efetivamente investiu naquele mês
+   e salve. Este é o único registro financeiro do investimento no orçamento.
+3. Abra **Metas** e clique em **+ Nova meta**. Informe nome, valor desejado e
+   prazo (mês/ano). A meta não cria despesas nem depósitos automaticamente.
+4. Clique em **Alocar** ao lado da meta, escolha uma parcela do valor realizado
+   no mês selecionado e confirme. Repita para outras metas, se desejar.
+5. Para corrigir uma parcela, volte ao mesmo mês e edite o valor em **Alocar**;
+   utilize `0` para desvinculá-la. Em nenhum momento o orçamento será duplicado.
+
+**Exemplo:** R$ 1.000 registrados em Finanças/Realizado podem ser distribuídos
+como R$ 600 para reserva, R$ 300 para viagem e R$ 100 não associados a metas.
+O programa não permite associar mais de R$ 1.000. Se já houver R$ 900
+associados e você tentar diminuir o investimento realizado para R$ 800,
+a alteração é recusada até que as alocações sejam reduzidas.
+
+### Conceitos e limitações
+
+- O saldo apresentado nas metas é a **soma nominal das parcelas associadas**
+  até o mês selecionado; não é o saldo de uma conta nem o valor de mercado
+  de aplicações. Não inclui juros ou correção monetária.
+- O prazo (mês/ano) é usado para calcular o **valor médio mensal necessário**
+  para alcançar a diferença restante, após o mês selecionado e **sem juros**.
+  É apenas uma projeção aritmética, não uma transferência programada.
+- A primeira versão não calcula rentabilidade, não faz transferências e não
+  cria investimentos reais.
+- O campo **Planejado** da aba Finanças não alimenta o progresso das metas:
+  somente valores registrados em **Realizado** podem ser associados.
+- Valores não associados permanecem visíveis e disponíveis para distribuir.
+- Uma meta que possui parcelas associadas não pode ser excluída. Para
+  removê-la, desvincule primeiro suas parcelas nos meses correspondentes.
+- É possível editar o valor desejado ou o prazo sem alterar o histórico.
+- O número de metas e parcelas é limitado a 64 e 2048, respectivamente,
+  para manter armazenamento simples e consumo baixo de memória.
+
+### Arquivos e segurança
+
+As metas ficam em `~/.local/share/invest/metas.tsv` ou
+`$XDG_DATA_HOME/invest/metas.tsv`. O arquivo utiliza valores monetários
+em **centavos inteiros**, UTF-8, gravação atômica e cópia válida `.bak`.
+O `invest-doctor check` e `invest-doctor recover` agora incluem `metas.tsv`.
+A v0.3.15 abre os arquivos antigos de cenários, orçamento e cotações sem migração.
+Um backup antes da atualização é recomendado:
+
+```sh
+cp -a ~/.local/share/invest "$HOME/invest-backup-$(date +%Y%m%d-%H%M%S)"
+```
+
+### Void Linux
+
+```sh
+sudo xbps-install -S gcc make pkg-config cairo-devel libX11-devel curl ca-certificates
+tar -xzf invest-v0.3.15-source.tar.gz
+cd invest-v0.3.15
+make
+make test
+./invest
+```
+
+Caso deseje usar o diagnóstico: feche o aplicativo e execute `./invest-doctor check`.
 
 ## Novo na v0.3.14 — migração de BTC/XMR para rate.sx
 

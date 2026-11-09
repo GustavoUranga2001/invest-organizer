@@ -8,6 +8,7 @@
 #include "utf8.h"
 #include "compose.h"
 #include "market.h"
+#include "goals.h"
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -26,9 +27,9 @@
 #include <signal.h>
 #include <unistd.h>
 
-/* invest v0.3.14: indicadores sob demanda, sem bloquear X11.
+/* invest v0.3.15: indicadores sob demanda, sem bloquear X11.
  * C11, Xlib e Cairo. Sem GTK, Qt, browser, timers ou polling. */
-#define APP_TITLE "invest 0.3.14"
+#define APP_TITLE "invest 0.3.15"
 #define SIDE 242
 #define MAX_CLICKS 240
 #define MAX_EDIT 128
@@ -42,11 +43,11 @@ typedef enum {
     GREEN_PALE, RED, RED_PALE, LIGHT, SIDE_BG, GRID, SHADOW, PURPLE,
     SIDE_ACTIVE, SIDE_TEXT, COLOR_COUNT
 } Color;
-typedef enum { SIMULATE, EVENTS, COMPARE, FINANCES } AppView;
-typedef enum { MODAL_NONE, MODAL_EVENT_EDIT, MODAL_BUDGET_EDIT, MODAL_INVESTMENT_EDIT, MODAL_CONFIRM } Modal;
-typedef enum { F_NONE = -1, F_NAME, F_INITIAL, F_MONTHLY, F_RATE, F_MONTHS, F_EVENT_MONTH, F_EVENT_VALUE, F_EVENT_DURATION, F_BUDGET_NAME, F_BUDGET_AMOUNT, F_INVESTMENT_AMOUNT } Field;
+typedef enum { SIMULATE, EVENTS, COMPARE, FINANCES, GOALS } AppView;
+typedef enum { MODAL_NONE, MODAL_EVENT_EDIT, MODAL_BUDGET_EDIT, MODAL_INVESTMENT_EDIT, MODAL_GOAL_EDIT, MODAL_GOAL_ALLOC, MODAL_CONFIRM } Modal;
+typedef enum { F_NONE = -1, F_NAME, F_INITIAL, F_MONTHLY, F_RATE, F_MONTHS, F_EVENT_MONTH, F_EVENT_VALUE, F_EVENT_DURATION, F_BUDGET_NAME, F_BUDGET_AMOUNT, F_INVESTMENT_AMOUNT, F_GOAL_NAME, F_GOAL_TARGET, F_GOAL_DEADLINE_YEAR, F_GOAL_DEADLINE_MONTH, F_GOAL_ALLOC_AMOUNT } Field;
 typedef enum {
-    A_NOTHING, A_SCREEN_SIM, A_SCREEN_EVENTS, A_SCREEN_COMPARE, A_SCREEN_FINANCES, A_NEW, A_DUPLICATE, A_DELETE,
+    A_NOTHING, A_SCREEN_SIM, A_SCREEN_EVENTS, A_SCREEN_COMPARE, A_SCREEN_FINANCES, A_SCREEN_GOALS, A_NEW, A_DUPLICATE, A_DELETE,
     A_CHOOSE, A_SAVE, A_OPEN_EVENTS, A_CLOSE_MODAL, A_EVENT_RATE_TAB, A_EVENT_MONTHLY_TAB,
     A_EVENT_EXTRA_TAB, A_EVENT_NEW, A_EVENT_EDIT, A_EVENT_DELETE, A_EVENT_SAVE,
     A_EVENT_CANCEL, A_EVENT_FOREVER, A_EVENT_TEMP, A_CONFIRM_OK, A_CONFIRM_CANCEL, A_CMP_A, A_CMP_B,
@@ -54,9 +55,11 @@ typedef enum {
     A_BUDGET_INCOME, A_BUDGET_EXPENSE, A_BUDGET_NEW, A_BUDGET_EDIT, A_BUDGET_DELETE,
     A_BUDGET_CATEGORY, A_BUDGET_FIXED, A_BUDGET_VARIABLE, A_BUDGET_SAVE, A_BUDGET_CANCEL,
     A_BUDGET_PREV, A_BUDGET_NEXT, A_INVESTMENT_EDIT, A_INVESTMENT_SAVE, A_INVESTMENT_CANCEL,
-    A_MONTH_PREV, A_MONTH_NEXT, A_MONTH_PLAN, A_MONTH_ACTUAL, A_MONTH_COPY, A_MONTH_YEAR, A_MONTH_CHART, A_MARKET_REFRESH
+    A_MONTH_PREV, A_MONTH_NEXT, A_MONTH_PLAN, A_MONTH_ACTUAL, A_MONTH_COPY, A_MONTH_YEAR, A_MONTH_CHART, A_MARKET_REFRESH,
+    A_GOAL_NEW, A_GOAL_EDIT, A_GOAL_SAVE, A_GOAL_CANCEL, A_GOAL_ALLOC, A_GOAL_ALLOC_SAVE,
+    A_GOAL_DELETE, A_GOAL_PREV, A_GOAL_NEXT
 } Action;
-typedef enum { CONFIRM_SCENARIO, CONFIRM_EVENT, CONFIRM_BUDGET } ConfirmKind;
+typedef enum { CONFIRM_SCENARIO, CONFIRM_EVENT, CONFIRM_BUDGET, CONFIRM_GOAL } ConfirmKind;
 
 typedef struct { Rect box; Action action; int arg; } Hit;
 
@@ -73,7 +76,7 @@ typedef struct {
     AppFont *f_small,*f_normal,*f_bold,*f_title,*f_number;
     cairo_surface_t *surface;
     cairo_t *cr;
-    int w,h,running,dirty,budget_dirty,frame_ready;
+    int w,h,running,dirty,budget_dirty,goals_dirty,frame_ready;
     const AppFont *last_font;
     struct {
         int valid, year;
@@ -83,6 +86,8 @@ typedef struct {
     ScenarioStore store;
     BudgetStore budget; /* Active planned or actual budget. */
     MonthlyBudget monthly;
+    GoalsStore goals;
+    int goal_edit_id, goal_scroll;
     int budget_year, budget_month, budget_mode; /* 0 planned, 1 actual */
     int year_view, chart_metric;
     BudgetKind budget_filter;
@@ -284,6 +289,10 @@ static int save(void) {
         }
         app.budget_dirty=0;
     }
+    if(app.goals_dirty){
+        if(goals_save(&app.goals,err,sizeof(err))<0){status(err,1);return -1;}
+        app.goals_dirty=0;
+    }
     status("Alterações salvas",0);return 0;
 }
 static void modified(void){app.dirty=1;}
@@ -413,6 +422,8 @@ static void get_field_text(Field f,char*out,size_t n) {
 static char event_month_text[MAX_EDIT],event_value_text[MAX_EDIT],event_duration_text[MAX_EDIT];
 static char budget_name_text[MAX_EDIT],budget_amount_text[MAX_EDIT];
 static char investment_amount_text[MAX_EDIT];
+static char goal_name_text[MAX_EDIT],goal_target_text[MAX_EDIT];
+static char goal_year_text[MAX_EDIT],goal_month_text[MAX_EDIT],goal_allocation_text[MAX_EDIT];
 static void event_editor_load(void){
     get_field_text(F_EVENT_MONTH,event_month_text,sizeof(event_month_text));
     get_field_text(F_EVENT_VALUE,event_value_text,sizeof(event_value_text));
@@ -565,6 +576,10 @@ static int update_investment(void){
         status("Informe um investimento mensal válido (0 a 1 trilhão).",1);return -1;
     }
     candidate.monthly_investment=round(amount*100.0)/100.0;
+    if(app.budget_mode &&
+       llround(candidate.monthly_investment*100.0)<goals_month_total(&app.goals,app.budget_year,app.budget_month)){
+        status("Reduza primeiro as parcelas de metas deste mês.",1);return -1;
+    }
     if(budget_totals(&candidate,&check)<0){status("Valor invalido.",1);return -1;}
     if(candidate.monthly_investment!=app.budget.monthly_investment){
         app.budget=candidate;budget_modified();
@@ -589,6 +604,11 @@ static void begin_focus(Field f){
     else if(f==F_BUDGET_NAME)snprintf(buf,sizeof(buf),"%s",budget_name_text);
     else if(f==F_BUDGET_AMOUNT)snprintf(buf,sizeof(buf),"%s",budget_amount_text);
     else if(f==F_INVESTMENT_AMOUNT)snprintf(buf,sizeof(buf),"%s",investment_amount_text);
+    else if(f==F_GOAL_NAME)snprintf(buf,sizeof(buf),"%s",goal_name_text);
+    else if(f==F_GOAL_TARGET)snprintf(buf,sizeof(buf),"%s",goal_target_text);
+    else if(f==F_GOAL_DEADLINE_YEAR)snprintf(buf,sizeof(buf),"%s",goal_year_text);
+    else if(f==F_GOAL_DEADLINE_MONTH)snprintf(buf,sizeof(buf),"%s",goal_month_text);
+    else if(f==F_GOAL_ALLOC_AMOUNT)snprintf(buf,sizeof(buf),"%s",goal_allocation_text);
     else get_field_text(f,buf,sizeof(buf));
     snprintf(app.input,sizeof(app.input),"%s",buf);
     app.caret=(int)strlen(app.input);app.sel_all=1;
@@ -616,6 +636,11 @@ static int end_focus(void){
     else if(f==F_BUDGET_NAME)snprintf(budget_name_text,sizeof(budget_name_text),"%s",app.input);
     else if(f==F_BUDGET_AMOUNT)snprintf(budget_amount_text,sizeof(budget_amount_text),"%s",app.input);
     else if(f==F_INVESTMENT_AMOUNT)snprintf(investment_amount_text,sizeof(investment_amount_text),"%s",app.input);
+    else if(f==F_GOAL_NAME)snprintf(goal_name_text,sizeof(goal_name_text),"%s",app.input);
+    else if(f==F_GOAL_TARGET)snprintf(goal_target_text,sizeof(goal_target_text),"%s",app.input);
+    else if(f==F_GOAL_DEADLINE_YEAR)snprintf(goal_year_text,sizeof(goal_year_text),"%s",app.input);
+    else if(f==F_GOAL_DEADLINE_MONTH)snprintf(goal_month_text,sizeof(goal_month_text),"%s",app.input);
+    else if(f==F_GOAL_ALLOC_AMOUNT)snprintf(goal_allocation_text,sizeof(goal_allocation_text),"%s",app.input);
     else if(apply_field(f,app.input)<0)return -1;
     app.focus=F_NONE;app.sel_all=0;return 0;
 }
@@ -674,12 +699,13 @@ static void draw_header(void){
     Rect savebtn={app.w-159,18,132,38};
     fill((Rect){0,0,app.w,74},SIDE_BG);
     txt(22,46,"invest.",INK,app.f_title);
-    txt(114,42,"v0.3.14",SIDE_TEXT,app.f_small);
-    header_tab((Rect){251,17,114,39},"SIMULADOR",app.view==SIMULATE,A_SCREEN_SIM);
-    header_tab((Rect){374,17,96,39},"EVENTOS",app.view==EVENTS,A_SCREEN_EVENTS);
-    header_tab((Rect){479,17,112,39},"COMPARAR",app.view==COMPARE,A_SCREEN_COMPARE);
-    header_tab((Rect){600,17,115,39},"FINANÇAS",app.view==FINANCES,A_SCREEN_FINANCES);
-    button(savebtn,app.dirty||app.budget_dirty?"Salvar agora":"Salvar",1,A_SAVE,0);
+    txt(114,42,"v0.3.15",SIDE_TEXT,app.f_small);
+    header_tab((Rect){233,17,107,39},"SIMULADOR",app.view==SIMULATE,A_SCREEN_SIM);
+    header_tab((Rect){345,17,85,39},"EVENTOS",app.view==EVENTS,A_SCREEN_EVENTS);
+    header_tab((Rect){435,17,102,39},"COMPARAR",app.view==COMPARE,A_SCREEN_COMPARE);
+    header_tab((Rect){542,17,98,39},"FINANÇAS",app.view==FINANCES,A_SCREEN_FINANCES);
+    header_tab((Rect){645,17,81,39},"METAS",app.view==GOALS,A_SCREEN_GOALS);
+    button(savebtn,app.dirty||app.budget_dirty||app.goals_dirty?"Salvar agora":"Salvar",1,A_SAVE,0);
 }
 
 /* Mercado ocupa um canto fixo da lateral. Nenhuma chamada de rede durante
@@ -821,7 +847,7 @@ static void draw_footer(void){
     char msg[240];
     cut_text(msg,sizeof(msg),app.status[0]?app.status:"Dados locais  |  Ctrl+S para salvar",app.w-SIDE-224,app.f_small);
     txt(SIDE+28,app.h-13,msg,app.error?RED:MUTED,app.f_small);
-    text_right(app.w-27,app.h-13,(app.dirty||app.budget_dirty)?"Alteracoes pendentes":"Tudo salvo",(app.dirty||app.budget_dirty)?BLUE:GREEN,app.f_small);
+    text_right(app.w-27,app.h-13,(app.dirty||app.budget_dirty||app.goals_dirty)?"Alterações pendentes":"Tudo salvo",(app.dirty||app.budget_dirty||app.goals_dirty)?BLUE:GREEN,app.f_small);
 }
 static void draw_graph(Rect r,const Scenario *a,const Scenario *b) {
     double balancesA[INVEST_MAX_MONTHS+1],capitalA[INVEST_MAX_MONTHS+1];
@@ -1188,6 +1214,165 @@ static void draw_budget(void){
         txt(x+20,r.y+r.h-18,"Valores deste mês; planejado e realizado são independentes.",MUTED,app.f_small);
     }
 }
+static Rect modal_box(void);
+/* Metas não movimentam dinheiro. Apenas classificam parcelas do investimento
+ * já registrado em Finanças / Realizado. Nunca somamos essas parcelas ao orçamento. */
+static long long actual_investment_cents(void){
+    return llround(app.monthly.actual.monthly_investment*100.0);
+}
+static void launch_goal_editor(int id){
+    app.goal_edit_id=id;app.focus=F_NONE;app.modal=MODAL_GOAL_EDIT;
+    goal_name_text[0]=goal_target_text[0]=0;
+    snprintf(goal_year_text,sizeof(goal_year_text),"%d",app.budget_year+1);
+    snprintf(goal_month_text,sizeof(goal_month_text),"%d",app.budget_month);
+    int ix=goals_find(&app.goals,id);
+    if(ix>=0){
+        Goal *g=&app.goals.items[ix];
+        snprintf(goal_name_text,sizeof(goal_name_text),"%s",g->name);
+        number(g->target_cents/100.0,goal_target_text,sizeof(goal_target_text));
+        snprintf(goal_year_text,sizeof(goal_year_text),"%d",g->deadline_year);
+        snprintf(goal_month_text,sizeof(goal_month_text),"%d",g->deadline_month);
+    }
+    status("",0);
+}
+static int update_goal(void){
+    double value;int y,m;char tail;
+    if(parse_number(goal_target_text,&value)<0||value<=0||value>1e12||
+       sscanf(goal_year_text,"%d%c",&y,&tail)!=1||
+       sscanf(goal_month_text,"%d%c",&m,&tail)!=1||
+       y<1900||y>2200||m<1||m>12){status("Confira valor, ano e mês da meta.",1);return -1;}
+    GoalsStore *s=&app.goals;int rc;
+    long long cents=llround(value*100.0);
+    if(app.goal_edit_id<0)rc=goals_add(s,goal_name_text,cents,y,m);
+    else rc=goals_edit(s,app.goal_edit_id,goal_name_text,cents,y,m);
+    if(rc<0){status("Nome inválido ou limite de metas atingido.",1);return -1;}
+    app.goals_dirty=1;app.modal=MODAL_NONE;status("Meta atualizada.",0);return 0;
+}
+static void launch_goal_allocation_editor(int id){
+    app.goal_edit_id=id;app.focus=F_NONE;app.modal=MODAL_GOAL_ALLOC;
+    number(goals_month_for(&app.goals,id,app.budget_year,app.budget_month)/100.0,
+           goal_allocation_text,sizeof(goal_allocation_text));
+    status("",0);
+}
+static int update_goal_allocation(void){
+    double amount;
+    if(parse_number(goal_allocation_text,&amount)<0||amount<0||amount>1e12){
+        status("Informe uma parcela válida (0 para remover).",1);return -1;
+    }
+    if(app.budget_dirty&&save()<0)return -1;
+    int rc=goals_allocate(&app.goals,app.goal_edit_id,app.budget_year,app.budget_month,
+                          llround(amount*100.0),actual_investment_cents());
+    if(rc<0){
+        status(rc==-2?"Soma das metas supera o investimento realizado neste mês.":
+               "Não foi possível registrar a parcela da meta.",1);return -1;
+    }
+    app.goals_dirty=1;app.modal=MODAL_NONE;
+    status("Parcela associada ao investimento realizado, sem novo lançamento.",0);return 0;
+}
+static void draw_goals(void){
+    int x=SIDE+30,w=app.w-SIDE-60;Rect r;
+    char str[160],cash[80],monthtext[80];
+    long long actual=actual_investment_cents();
+    long long allocated=goals_month_total(&app.goals,app.budget_year,app.budget_month);
+    long long free_cents=actual-allocated;
+    txt(x,113,"Metas financeiras",INK,app.f_title);
+    button((Rect){x,132,37,34},"<",0,A_MONTH_PREV,0);
+    snprintf(monthtext,sizeof(monthtext),"%s de %d",month_labels[app.budget_month-1],app.budget_year);
+    txt(x+45,155,monthtext,INK,app.f_bold);
+    button((Rect){x+210,132,37,34},">",0,A_MONTH_NEXT,0);
+    button((Rect){x+w-150,132,150,35},"+ Nova meta",1,A_GOAL_NEW,0);
+    txt(x,185,"Distribua o que foi investido em Finanças / Realizado. Sem duplicar valores.",MUTED,app.f_small);
+    int width=(w-20)/3;
+    for(int i=0;i<3;i++){
+        r=(Rect){x+i*(width+10),203,width,97};card(r);
+        txt(r.x+14,r.y+24,i==0?"Investido no mês":i==1?"Associado às metas":"Ainda não associado",MUTED,app.f_small);
+        money((i==0?actual:i==1?allocated:free_cents)/100.0,cash,sizeof(cash));
+        txt(r.x+14,r.y+61,cash,i==2?(free_cents<0?RED:GREEN):INK,app.f_title);
+        if(i==2&&free_cents<0)txt(r.x+14,r.y+82,"Revise o valor em Finanças",RED,app.f_small);
+    }
+    txt(x,328,"Objetivos",INK,app.f_title);
+    snprintf(str,sizeof(str),"%d meta(s) cadastrada(s)",app.goals.count);
+    text_right(x+w,327,str,MUTED,app.f_small);
+    r=(Rect){x,346,w,app.h-398};card(r);
+    int visible=imax(1,(r.h-76)/115);
+    app.goal_scroll=imin(app.goal_scroll,imax(0,app.goals.count-visible));
+    if(!app.goals.count){
+        txt(r.x+23,r.y+62,"Nenhuma meta cadastrada.",INK,app.f_bold);
+        txt(r.x+23,r.y+91,"Clique em + Nova meta para definir seu objetivo.",MUTED,app.f_small);
+    }
+    for(int j=0;j<visible && j+app.goal_scroll<app.goals.count;j++){
+        const Goal *g=&app.goals.items[j+app.goal_scroll];
+        int yy=r.y+15+j*115;Rect row={r.x+14,yy,r.w-28,107};
+        long long progress=goals_progress(&app.goals,g->id,app.budget_year,app.budget_month);
+        long long allocation=goals_month_for(&app.goals,g->id,app.budget_year,app.budget_month);
+        double pct=(double)progress/g->target_cents;
+        char title[90],goalval[65],got[65];rounded(row,8,LIGHT);
+        cut_text(title,sizeof(title),g->name,imax(90,row.w-260),app.f_bold);
+        txt(row.x+14,row.y+22,title,INK,app.f_bold);
+        money(progress/100.0,got,sizeof(got));money(g->target_cents/100.0,goalval,sizeof(goalval));
+        snprintf(str,sizeof(str),"%s de %s",got,goalval);
+        txt(row.x+14,row.y+44,str,MUTED,app.f_small);
+        rounded((Rect){row.x+14,row.y+56,imax(75,row.w-255),7},4,GRID);
+        int barw=imax(75,row.w-255);
+        if(pct>0)rounded((Rect){row.x+14,row.y+56,(int)(barw*fmin(1.0,pct)),7},3,BLUE);
+        {
+            char allocated_text[70];money(allocation/100.0,allocated_text,sizeof(allocated_text));
+            snprintf(str,sizeof(str),"Prazo: %02d/%d  |  Neste mês: %s",g->deadline_month,g->deadline_year,allocated_text);
+        }
+        txt(row.x+14,row.y+79,str,MUTED,app.f_small);
+        long long required=goals_required_monthly(&app.goals,g->id,app.budget_year,app.budget_month);
+        if(required==0)snprintf(str,sizeof(str),"Meta alcançada!");
+        else if(required<0)snprintf(str,sizeof(str),"Prazo atingido: objetivo ainda não alcançado.");
+        else{
+            char need[70];money(required/100.0,need,sizeof(need));
+            snprintf(str,sizeof(str),"Para alcançar: %s/mês, sem juros",need);
+        }
+        txt(row.x+14,row.y+98,str,required<0?RED:GREEN,app.f_small);
+        button((Rect){row.x+row.w-222,row.y+10,67,31},"Editar",0,A_GOAL_EDIT,g->id);
+        button((Rect){row.x+row.w-149,row.y+10,78,31},"Alocar",1,A_GOAL_ALLOC,g->id);
+        button((Rect){row.x+row.w-65,row.y+10,58,31},"X",3,A_GOAL_DELETE,g->id);
+    }
+    if(app.goals.count>visible){
+        button((Rect){x+14,r.y+r.h-34,100,27},"Anterior",0,A_GOAL_PREV,0);
+        button((Rect){x+121,r.y+r.h-34,100,27},"Próximo",0,A_GOAL_NEXT,0);
+    }
+}
+static void draw_goal_editor(void){
+    Rect outer=modal_box(),d={outer.x+65,outer.y+35,outer.w-130,525};
+    card(outer);card(d);
+    txt(d.x+23,d.y+38,app.goal_edit_id<0?"Nova meta financeira":"Editar meta",INK,app.f_title);
+    txt(d.x+23,d.y+69,"Defina um objetivo. O progresso virá dos investimentos realizados.",MUTED,app.f_small);
+    display_field((Rect){d.x+23,d.y+112,d.w-46,43},"Nome da meta",goal_name_text,F_GOAL_NAME,NULL);
+    display_field((Rect){d.x+23,d.y+201,d.w-46,43},"Valor desejado",goal_target_text,F_GOAL_TARGET,"R$");
+    int half=(d.w-55)/2;
+    display_field((Rect){d.x+23,d.y+290,half,43},"Mês do prazo (1 a 12)",goal_month_text,F_GOAL_DEADLINE_MONTH,NULL);
+    display_field((Rect){d.x+32+half,d.y+290,half,43},"Ano do prazo",goal_year_text,F_GOAL_DEADLINE_YEAR,NULL);
+    txt(d.x+23,d.y+392,"A meta não gera despesas nem aportes automaticamente.",MUTED,app.f_small);
+    button((Rect){d.x+23,d.y+454,126,40},"Cancelar",0,A_GOAL_CANCEL,0);
+    button((Rect){d.x+d.w-157,d.y+454,134,40},"Salvar meta",1,A_GOAL_SAVE,0);
+}
+static void draw_goal_allocation_editor(void){
+    Rect outer=modal_box(),d={outer.x+75,outer.y+91,outer.w-150,390};
+    card(outer);card(d);
+    int ix=goals_find(&app.goals,app.goal_edit_id);
+    if(ix<0)return;
+    char str[180],val[75];
+    txt(d.x+22,d.y+43,"Associar investimento à meta",INK,app.f_title);
+    char name[80];cut_text(name,sizeof(name),app.goals.items[ix].name,d.w-40,app.f_bold);
+    txt(d.x+22,d.y+76,name,GREEN,app.f_bold);
+    snprintf(str,sizeof(str),"Referente a %s de %d",month_labels[app.budget_month-1],app.budget_year);
+    txt(d.x+22,d.y+103,str,MUTED,app.f_small);
+    long long available=actual_investment_cents()-goals_month_total(&app.goals,app.budget_year,app.budget_month)
+        +goals_month_for(&app.goals,app.goal_edit_id,app.budget_year,app.budget_month);
+    money(available/100.0,val,sizeof(val));
+    snprintf(str,sizeof(str),"Disponível para esta meta: %s",val);
+    txt(d.x+22,d.y+141,str,MUTED,app.f_small);
+    display_field((Rect){d.x+22,d.y+184,d.w-44,45},"Parcela do investimento realizado",goal_allocation_text,F_GOAL_ALLOC_AMOUNT,"R$");
+    txt(d.x+22,d.y+266,"Use 0 para desvincular a parcela deste mês.",MUTED,app.f_small);
+    txt(d.x+22,d.y+288,"O registro financeiro original não será alterado.",MUTED,app.f_small);
+    button((Rect){d.x+22,d.y+328,127,40},"Cancelar",0,A_GOAL_CANCEL,0);
+    button((Rect){d.x+d.w-161,d.y+328,139,40},"Confirmar",1,A_GOAL_ALLOC_SAVE,0);
+}
 static Rect modal_box(void){
     int w=imin(740,app.w-110);int h=imin(606,app.h-95);
     return (Rect){(app.w-w)/2,(app.h-h)/2,w,h};
@@ -1343,7 +1528,8 @@ static void draw_confirm(void){
     txt(r.x+24,r.y+51,"Confirmar exclusao",INK,app.f_title);
     txt(r.x+24,r.y+105,app.confirm==CONFIRM_EVENT?
       "Remover este evento do cenário?":app.confirm==CONFIRM_BUDGET?
-      "Excluir este lançamento do orçamento?":"Excluir este cenário e seus eventos?",INK,app.f_normal);
+      "Excluir este lançamento do orçamento?":app.confirm==CONFIRM_GOAL?
+      "Excluir esta meta financeira?":"Excluir este cenário e seus eventos?",INK,app.f_normal);
     txt(r.x+24,r.y+134,"Esta acao nao pode ser desfeita.",MUTED,app.f_small);
     button((Rect){r.x+24,r.y+205,138,42},"Cancelar",0,A_CONFIRM_CANCEL,0);
     button((Rect){r.x+r.w-161,r.y+205,137,42},"Excluir",3,A_CONFIRM_OK,0);
@@ -1355,7 +1541,8 @@ static void paint(void){
     if(app.view==SIMULATE)draw_sim();
     else if(app.view==EVENTS)draw_events();
     else if(app.view==COMPARE)draw_compare();
-    else draw_budget();
+    else if(app.view==FINANCES)draw_budget();
+    else draw_goals();
     draw_footer();
     if(app.modal!=MODAL_NONE){
         /* Modal bloqueia completamente cliques na tela principal. */
@@ -1363,6 +1550,8 @@ static void paint(void){
         if(app.modal==MODAL_EVENT_EDIT)draw_event_editor();
         if(app.modal==MODAL_BUDGET_EDIT)draw_budget_editor();
         if(app.modal==MODAL_INVESTMENT_EDIT)draw_investment_editor();
+        if(app.modal==MODAL_GOAL_EDIT)draw_goal_editor();
+        if(app.modal==MODAL_GOAL_ALLOC)draw_goal_allocation_editor();
         if(app.modal==MODAL_CONFIRM)draw_confirm();
         if(app.status[0]){
             Rect r=modal_box();
@@ -1396,6 +1585,7 @@ static void execute(Action a,int arg){
     case A_SCREEN_EVENTS:app.view=EVENTS;app.event_scroll=0;break;
     case A_SCREEN_COMPARE:app.view=COMPARE;break;
     case A_SCREEN_FINANCES:app.view=FINANCES;break;
+    case A_SCREEN_GOALS:app.view=GOALS;break;
     case A_MONTH_PREV:month_shift(-1);break;
     case A_MONTH_NEXT:month_shift(1);break;
     case A_MONTH_PLAN:month_mode_set(0);break;
@@ -1404,6 +1594,15 @@ static void execute(Action a,int arg){
     case A_MONTH_YEAR:app.year_view=!app.year_view;break;
     case A_MONTH_CHART:app.chart_metric=(app.chart_metric+1)%4;break;
     case A_MARKET_REFRESH:market_start();break;
+    case A_GOAL_NEW:launch_goal_editor(-1);break;
+    case A_GOAL_EDIT:launch_goal_editor(arg);break;
+    case A_GOAL_SAVE:(void)update_goal();break;
+    case A_GOAL_ALLOC:launch_goal_allocation_editor(arg);break;
+    case A_GOAL_ALLOC_SAVE:(void)update_goal_allocation();break;
+    case A_GOAL_CANCEL:app.modal=MODAL_NONE;status("",0);break;
+    case A_GOAL_DELETE:app.goal_edit_id=arg;app.confirm=CONFIRM_GOAL;app.modal=MODAL_CONFIRM;break;
+    case A_GOAL_PREV:app.goal_scroll=imax(0,app.goal_scroll-2);break;
+    case A_GOAL_NEXT:app.goal_scroll=imin(imax(0,app.goals.count-1),app.goal_scroll+2);break;
     case A_NEW:scenario_new(0);break;
     case A_DUPLICATE:scenario_new(1);break;
     case A_DELETE:if(app.store.count>1){app.confirm=CONFIRM_SCENARIO;app.modal=MODAL_CONFIRM;}else status("Mantenha pelo menos um cenário.",1);break;
@@ -1424,6 +1623,12 @@ static void execute(Action a,int arg){
     case A_CONFIRM_OK:
         if(app.confirm==CONFIRM_SCENARIO){scenario_remove();app.modal=MODAL_NONE;}
         else if(app.confirm==CONFIRM_BUDGET){remove_budget();app.modal=MODAL_NONE;}
+        else if(app.confirm==CONFIRM_GOAL){
+            int rc=goals_delete(&app.goals,app.goal_edit_id);
+            app.modal=MODAL_NONE;
+            if(rc==0){app.goals_dirty=1;app.goal_scroll=0;status("Meta excluída.",0);}
+            else status("Retire as parcelas da meta antes de excluí-la.",1);
+        }
         else{remove_event();app.modal=MODAL_NONE;}
         break;
     case A_CONFIRM_CANCEL:app.modal=MODAL_NONE;status("",0);break;
@@ -1458,6 +1663,8 @@ static void mouse_press(int x,int y,unsigned button){
             app.event_scroll=imax(0,app.event_scroll+(button==4?-1:1));
         }else if(app.modal==MODAL_NONE&&app.view==FINANCES && inside(x,y,budget_list_box())){
             app.budget_scroll=imax(0,app.budget_scroll+(button==4?-1:1));
+        }else if(app.modal==MODAL_NONE&&app.view==GOALS&&inside(x,y,(Rect){SIDE+28,390,app.w-SIDE-60,app.h-450})){
+            app.goal_scroll=imax(0,imin(imax(0,app.goals.count-1),app.goal_scroll+(button==4?-1:1)));
         }else if(app.modal==MODAL_NONE&&app.view!=FINANCES&&inside(x,y,(Rect){0,130,SIDE,app.h-445})){
             app.sidebar_scroll=imax(0,app.sidebar_scroll+(button==4?-1:1));clamp_list();
         }return;
@@ -1487,7 +1694,7 @@ static char key_accent(KeySym sym){
 }
 static int is_dead_key(KeySym sym){return key_accent(sym)!=0;}
 static int focus_is_text(void){
-    return app.focus==F_NAME || app.focus==F_BUDGET_NAME;
+    return app.focus==F_NAME || app.focus==F_BUDGET_NAME || app.focus==F_GOAL_NAME;
 }
 static void reset_dead_composition(void){
     if(app.ic){char *unused=Xutf8ResetIC(app.ic);if(unused)XFree(unused);}
@@ -1542,7 +1749,7 @@ static void handle_key(XKeyEvent *ev){
     if(sym==XK_Escape){
         reset_dead_composition();
         if(app.focus!=F_NONE){app.focus=F_NONE;status("Edição cancelada.",0);}
-        else if(app.modal==MODAL_EVENT_EDIT||app.modal==MODAL_BUDGET_EDIT||app.modal==MODAL_INVESTMENT_EDIT||app.modal==MODAL_CONFIRM){app.modal=MODAL_NONE;}
+        else if(app.modal==MODAL_EVENT_EDIT||app.modal==MODAL_BUDGET_EDIT||app.modal==MODAL_INVESTMENT_EDIT||app.modal==MODAL_GOAL_EDIT||app.modal==MODAL_GOAL_ALLOC||app.modal==MODAL_CONFIRM){app.modal=MODAL_NONE;}
         return;
     }
     if(app.focus==F_NONE){
@@ -1550,12 +1757,18 @@ static void handle_key(XKeyEvent *ev){
         if(sym==XK_F2 && app.modal==MODAL_NONE)app.view=EVENTS;
         if(sym==XK_F3 && app.modal==MODAL_NONE)app.view=COMPARE;
         if(sym==XK_F4 && app.modal==MODAL_NONE)app.view=FINANCES;
+        if(sym==XK_F5 && app.modal==MODAL_NONE)app.view=GOALS;
         return;
     }
     if(sym==XK_Return||sym==XK_KP_Enter){end_focus();return;}
     if(sym==XK_Tab){
         Field next=app.focus;
-        if(app.modal==MODAL_EVENT_EDIT)
+        if(app.modal==MODAL_GOAL_EDIT)
+            next=app.focus==F_GOAL_NAME?F_GOAL_TARGET:
+                 app.focus==F_GOAL_TARGET?F_GOAL_DEADLINE_MONTH:
+                 app.focus==F_GOAL_DEADLINE_MONTH?F_GOAL_DEADLINE_YEAR:F_GOAL_NAME;
+        else if(app.modal==MODAL_GOAL_ALLOC)next=F_GOAL_ALLOC_AMOUNT;
+        else if(app.modal==MODAL_EVENT_EDIT)
             next=app.focus==F_EVENT_MONTH?F_EVENT_VALUE:
                  app.focus==F_EVENT_VALUE&&app.event_limited&&app.event_type!=INVEST_EXTRAS?
                  F_EVENT_DURATION:F_EVENT_MONTH;
@@ -1702,6 +1915,10 @@ int main(void){
         }
         app.budget=app.monthly.planned;
     }
+    {
+        int grc=goals_load(&app.goals,err,sizeof(err));
+        if(grc<0){fprintf(stderr,"invest: %s\nMetas preservadas. Execute invest-doctor check.\n",err);return EXIT_FAILURE;}
+    }
     if(!app.store.count){scenario_default(&app.store.items[0]);app.store.count=1;app.store.selected=0;app.dirty=1;}
     app.cmp_a=0;app.cmp_b=app.store.count>1?1:0;
     if(market_load(&app.market)<0){
@@ -1764,7 +1981,7 @@ int main(void){
         case ClientMessage:
             if((Atom)ev.xclient.data.l[0]==app.wm_delete){
                 if(end_focus()<0)break;
-                if((app.dirty||app.budget_dirty)&&save()<0)break;
+                if((app.dirty||app.budget_dirty||app.goals_dirty)&&save()<0)break;
                 app.running=0;
             }break;
         default:break;

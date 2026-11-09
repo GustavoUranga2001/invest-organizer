@@ -1,3 +1,18 @@
+# Registro de alterações
+
+## v0.3.15 — Metas financeiras integradas
+
+- Nova quinta aba **Metas** com nome, alvo monetário e prazo (mês/ano).
+- Progresso nominal baseado apenas nos investimentos de **Finanças / Realizado**.
+- Aporte médio mensal necessário para alcançar a meta no prazo, sem presumir juros.
+- Associação manual por mês a uma ou várias metas, sem gerar novo gasto ou aporte.
+- Impede parcelas superiores ao investimento realizado ou sua redução abaixo das parcelas.
+- Valores livres indicados na interface e metas com histórico protegidas contra exclusão acidental.
+- Arquivo próprio `metas.tsv` com centavos inteiros, UTF-8, backups e gravação atômica.
+- `invest-doctor` verifica e recupera também os dados de metas.
+- Preservadas todas as funcionalidades e a paleta Dark Elegant da v0.3.14.
+- Testes novos de limites, persistência, recuperação e integração pela GUI X11.
+
 # Histórico de mudanças
 
 ## v0.3.14 — rate.sx para BTC e XMR
